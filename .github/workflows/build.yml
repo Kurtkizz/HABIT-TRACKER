@@ -6,6 +6,10 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL /usr/local/lib/android
+          df -h /
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
@@ -22,10 +26,17 @@ jobs:
         shell: bash
         working-directory: SoloSystem/SoloSystem
         run: buildozer -v android debug 2>&1 | tee build.log
-      - name: Show last 60 lines of the log
+      - name: Show the real error
         if: failure()
         working-directory: SoloSystem/SoloSystem
-        run: tail -n 60 build.log
+        run: |
+          n=$(grep -n "ENVIRONMENT" build.log | tail -1 | cut -d: -f1)
+          [ -z "$n" ] && n=$(wc -l < build.log)
+          start=$((n-70)); [ $start -lt 1 ] && start=1
+          echo "===== 70 lines before the environment dump ====="
+          sed -n "${start},$((n-1))p" build.log
+          echo "===== key error lines ====="
+          grep -n "Command failed\|Traceback\|ModuleNotFoundError\|No such file\|undefined reference\|FAILED" build.log | tail -n 20
       - name: Save full log
         if: always()
         uses: actions/upload-artifact@v4
