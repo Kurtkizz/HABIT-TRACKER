@@ -1,4 +1,5 @@
 import os
+import time
 from kivy.app import App
 from kivy.lang import Builder
 from kivy.clock import Clock
@@ -144,6 +145,11 @@ KV = """
             color: 1, 0.4, 0.4, 1
             size_hint_y: None
             height: dp(28)
+        SB:
+            text: 'START GPS RUN TRACKER'
+            size_hint_y: None
+            height: dp(48)
+            on_release: app.open_run()
         ScrollView:
             GridLayout:
                 id: quest_box
@@ -227,7 +233,7 @@ KV = """
                 size_hint_y: None
                 height: dp(260)
             L:
-                text: 'Daily quests  (name | reward EXP | penalty EXP | punishment)'
+                text: 'Daily quests  (name | reward | penalty | punishment | target | unit)'
                 size_hint_y: None
                 height: dp(24)
             TI:
@@ -244,6 +250,54 @@ KV = """
                 size_hint_y: None
                 height: dp(48)
                 on_release: app.admin_reissue()
+            L:
+                text: '[b]Add a daily quest[/b]'
+                size_hint_y: None
+                height: dp(28)
+            TI:
+                id: q_name
+                hint_text: 'Quest name (e.g. Pull-ups)'
+                multiline: False
+                size_hint_y: None
+                height: dp(44)
+            TI:
+                id: q_target
+                hint_text: 'Target amount (e.g. 50)'
+                input_filter: 'float'
+                multiline: False
+                size_hint_y: None
+                height: dp(44)
+            TI:
+                id: q_unit
+                hint_text: 'Unit (reps, km, minutes...)'
+                multiline: False
+                size_hint_y: None
+                height: dp(44)
+            TI:
+                id: q_reward
+                hint_text: 'Reward EXP (e.g. 40)'
+                input_filter: 'int'
+                multiline: False
+                size_hint_y: None
+                height: dp(44)
+            TI:
+                id: q_penalty
+                hint_text: 'Penalty EXP if failed (e.g. 30)'
+                input_filter: 'int'
+                multiline: False
+                size_hint_y: None
+                height: dp(44)
+            TI:
+                id: q_punish
+                hint_text: 'Punishment if failed'
+                multiline: False
+                size_hint_y: None
+                height: dp(44)
+            SB:
+                text: 'ADD QUEST'
+                size_hint_y: None
+                height: dp(48)
+                on_release: app.admin_add_quest(q_name.text, q_target.text, q_unit.text, q_reward.text, q_penalty.text, q_punish.text)
             TI:
                 id: name_in
                 hint_text: 'Player name'
@@ -449,12 +503,18 @@ class SoloSystemApp(App):
         d = self.g.d
         for i, q in enumerate(d["quests"]):
             mark = "[X]" if q["done"] else "[  ]"
-            b = Button(text="%s  %s   (+%d EXP | fail: -%d EXP)" % (mark, q["name"], q["reward"], q["penalty"]),
+            tgt = q.get("target", 1)
+            if tgt > 1:
+                label = "%s  %s   %g / %g %s\n(+%d EXP | fail: -%d EXP)" % (
+                    mark, q["name"], q.get("progress", 0), tgt, q.get("unit", ""), q["reward"], q["penalty"])
+            else:
+                label = "%s  %s   (+%d EXP | fail: -%d EXP)" % (mark, q["name"], q["reward"], q["penalty"])
+            b = Button(text=label,
                        size_hint_y=None, height=dp(60), background_normal="", disabled=q["done"],
                        background_color=(0.05, 0.3, 0.2, 1) if q["done"] else (0.05, 0.18, 0.35, 1),
                        color=(0.6, 0.95, 1, 1), halign="center")
             b.bind(width=lambda w, v: setattr(w, "text_size", (v - 16, None)))
-            b.bind(on_release=lambda w, idx=i: self.finish_quest(idx))
+            b.bind(on_release=lambda w, idx=i: self.quest_tapped(idx))
             box.add_widget(b)
         for i, p in enumerate(d["punishments"]):
             b = Button(text="PENALTY: %s\n(tap when completed)" % p, size_hint_y=None, height=dp(70),
@@ -509,9 +569,9 @@ class SoloSystemApp(App):
         box = BoxLayout(orientation="vertical", spacing=dp(6), padding=dp(8))
         box.add_widget(Label(text="Unknown habit. Classify it:\n[b]%s[/b]" % text, markup=True,
                              color=(0.7, 1, 1, 1)))
-        pop = Popup(title="[ SYSTEM ]", content=box, size_hint=(0.9, 0.6), title_color=(0.25, 0.85, 1, 1),
+        pop = Popup(title="[ SYSTEM ]", content=box, size_hint=(0.9, 0.75), title_color=(0.25, 0.85, 1, 1),
                     separator_color=(0.25, 0.85, 1, 1), background_color=(0.02, 0.05, 0.12, 1))
-        for label, val in (("GOOD  +20", 20), ("NEUTRAL  0", 0), ("BAD  -10", -10), ("SEVERE  -40", -40)):
+        for label, val in (("EXCELLENT  +40", 40), ("GOOD  +20", 20), ("NEUTRAL  0", 0), ("BAD  -10", -10), ("SEVERE  -40", -40)):
             b = Button(text=label, background_normal="", background_color=(0.05, 0.18, 0.35, 1),
                        color=(0.6, 0.95, 1, 1), size_hint_y=None, height=dp(44))
             b.bind(on_release=lambda w, v=val: self.classified(pop, text, v))
@@ -523,6 +583,50 @@ class SoloSystemApp(App):
         self.g.add_rule(text, val)
         self.show_result(self.g.apply_habit(text, val))
 
+    def quest_tapped(self, i):
+        if self.g.d["quests"][i].get("target", 1) > 1:
+            self.ask_amount(i)
+        else:
+            self.finish_quest(i)
+
+    def ask_amount(self, i):
+        q = self.g.d["quests"][i]
+        target, done = q.get("target", 1), q.get("progress", 0)
+        box = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
+        box.add_widget(Label(text="[b]%s[/b]\n%g / %g %s done" % (q["name"], done, target, q.get("unit", "")),
+                             markup=True, color=(0.7, 1, 1, 1)))
+        inp = TextInput(hint_text="Amount to add (e.g. 20)", input_filter="float", multiline=False,
+                        size_hint_y=None, height=dp(44))
+        box.add_widget(inp)
+        row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
+        pop = Popup(title="[ ADD PROGRESS ]", content=box, size_hint=(0.9, 0.5), title_color=(0.25, 0.85, 1, 1),
+                    separator_color=(0.25, 0.85, 1, 1), background_color=(0.02, 0.05, 0.12, 1))
+
+        def add(*a):
+            try:
+                n = float(inp.text)
+            except ValueError:
+                return
+            pop.dismiss()
+            self.apply_progress(i, n)
+
+        def full(*a):
+            pop.dismiss()
+            self.apply_progress(i, target - done)
+        for text, cb in (("ADD", add), ("COMPLETE ALL", full)):
+            b = Button(text=text, background_normal="", background_color=(0.05, 0.18, 0.35, 1), color=(0.6, 0.95, 1, 1))
+            b.bind(on_release=cb)
+            row.add_widget(b)
+        inp.bind(on_text_validate=add)
+        box.add_widget(row)
+        pop.open()
+
+    def apply_progress(self, i, amount):
+        msgs = self.g.add_progress(i, amount)
+        self.refresh()
+        if msgs:
+            self.popup("[ QUEST ]", "\n".join(msgs))
+
     def finish_quest(self, i):
         msgs = self.g.complete_quest(i)
         self.refresh()
@@ -532,6 +636,107 @@ class SoloSystemApp(App):
     def finish_punishment(self, i):
         self.g.complete_punishment(i)
         self.refresh()
+
+    # ---------- GPS run tracker ----------
+    def open_run(self):
+        from engine import RunTracker
+        self.tracker = RunTracker()
+        self.running = False
+        box = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
+        self.run_label = Label(text="0.00 km\n00:00\nPress START", font_size="22sp", halign="center",
+                               color=(0.7, 1, 1, 1))
+        box.add_widget(self.run_label)
+        row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(6))
+        self.run_pop = Popup(title="[ RUN TRACKER ]", content=box, size_hint=(0.92, 0.6), auto_dismiss=False,
+                             title_color=(0.25, 0.85, 1, 1), separator_color=(0.25, 0.85, 1, 1),
+                             background_color=(0.02, 0.05, 0.12, 1))
+        for text, cb in (("START", self.start_run), ("FINISH", self.finish_run), ("CANCEL", self.cancel_run)):
+            b = Button(text=text, background_normal="", background_color=(0.05, 0.18, 0.35, 1), color=(0.6, 0.95, 1, 1))
+            b.bind(on_release=cb)
+            row.add_widget(b)
+        box.add_widget(row)
+        self.run_pop.open()
+
+    def start_run(self, *a):
+        if self.running:
+            return
+        try:
+            from android.permissions import request_permissions
+            request_permissions(["android.permission.ACCESS_FINE_LOCATION", "android.permission.ACCESS_COARSE_LOCATION"],
+                                lambda perms, grants: Clock.schedule_once(
+                                    lambda dt: self._start_gps() if all(grants) else self.popup(
+                                        "[ GPS ]", "Location permission is needed to track your run."), 0))
+        except ImportError:  # not on Android
+            self._start_gps()
+
+    def _start_gps(self):
+        try:
+            from plyer import gps
+            gps.configure(on_location=self.on_gps, on_status=lambda *a, **k: None)
+            gps.start(minTime=1000, minDistance=0)
+        except Exception as e:
+            self.popup("[ GPS ]", "GPS is not available here.\n%s" % e)
+            return
+        self.running = True
+        self.run_t0 = time.time()
+        self.keep_awake(True)
+        Clock.schedule_interval(self.run_tick, 1)
+
+    def on_gps(self, **kw):  # called from the GPS thread: only update numbers here
+        lat, lon = kw.get("lat"), kw.get("lon")
+        if lat is not None and lon is not None:
+            self.tracker.update(float(lat), float(lon), kw.get("accuracy"))
+
+    def run_tick(self, dt):
+        if not self.running:
+            return False
+        s = int(time.time() - self.run_t0)
+        note = "" if self.tracker.last else "\nWaiting for GPS signal..."
+        self.run_label.text = "%.2f km\n%02d:%02d%s" % (self.tracker.meters / 1000.0, s // 60, s % 60, note)
+
+    def stop_gps(self):
+        if self.running:
+            try:
+                from plyer import gps
+                gps.stop()
+            except Exception:
+                pass
+        self.running = False
+        Clock.unschedule(self.run_tick)
+        self.keep_awake(False)
+
+    def finish_run(self, *a):
+        km = self.tracker.meters / 1000.0
+        self.stop_gps()
+        self.run_pop.dismiss()
+        if km < 0.01:
+            self.popup("[ RUN ]", "No distance was recorded.")
+            return
+        i, msgs = self.g.add_run_km(km)
+        self.refresh()
+        if i is None:
+            self.popup("[ RUN ]", "Tracked %.2f km, but there is no open quest measured in km." % km)
+        else:
+            self.popup("[ RUN ]", "Added %.2f km to %s\n%s" % (km, self.g.d["quests"][i]["name"], "\n".join(msgs)))
+
+    def cancel_run(self, *a):
+        self.stop_gps()
+        self.run_pop.dismiss()
+
+    def keep_awake(self, on):
+        try:
+            from android.runnable import run_on_ui_thread
+            from jnius import autoclass
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+            flag = autoclass("android.view.WindowManager$LayoutParams").FLAG_KEEP_SCREEN_ON
+
+            @run_on_ui_thread
+            def go():
+                w = activity.getWindow()
+                w.addFlags(flag) if on else w.clearFlags(flag)
+            go()
+        except Exception:
+            pass
 
     # ---------- admin ----------
     def open_admin(self):
@@ -587,6 +792,24 @@ class SoloSystemApp(App):
             self.g.check_titles()
             self.g.save()
             self.refresh()
+
+    def admin_add_quest(self, name, target, unit, reward, penalty, punish):
+        name = name.strip()
+        if not name:
+            self.popup("[ ADMIN ]", "Enter a quest name first.")
+            return
+        try:
+            t, r, p = float(target or 1), int(reward or 30), int(penalty or 20)
+        except ValueError:
+            self.popup("[ ADMIN ]", "Target, reward and penalty must be numbers.")
+            return
+        self.g.add_template(name, t, unit.strip(), r, p, punish.strip() or "Penalty Zone: 30 push-ups")
+        ids = self.screen("admin").ids
+        for k in ("q_name", "q_target", "q_unit", "q_reward", "q_penalty", "q_punish"):
+            ids[k].text = ""
+        ids.quests_in.text = quests_to_text(self.g.d["templates"])
+        self.refresh()
+        self.popup("[ ADMIN ]", "Quest added: %s\nIt appears in today's quests now and in every new day." % name)
 
     def admin_gold(self, txt):
         if txt.strip().isdigit():

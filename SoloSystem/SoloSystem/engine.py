@@ -1,4 +1,4 @@
-import json, os, re, time
+import json, math, os, re, time
 
 DAY = 86400
 RANKS = [(1, "E"), (10, "D"), (20, "C"), (35, "B"), (50, "A"), (70, "S"),
@@ -43,11 +43,49 @@ DEFAULT_HABITS = [
 ]
 
 DEFAULT_QUESTS = [
-    {"name": "100 Push-ups", "reward": 40, "penalty": 30, "punishment": "Penalty Zone: 50 extra push-ups"},
-    {"name": "100 Sit-ups", "reward": 40, "penalty": 30, "punishment": "Penalty Zone: 50 extra sit-ups"},
-    {"name": "100 Squats", "reward": 40, "penalty": 30, "punishment": "Penalty Zone: 50 extra squats"},
-    {"name": "Run 10 km", "reward": 60, "penalty": 40, "punishment": "Penalty Zone: run 3 km extra"},
+    {"name": "Push-ups", "reward": 40, "penalty": 30, "punishment": "Penalty Zone: 50 extra push-ups", "target": 100, "unit": "reps"},
+    {"name": "Sit-ups", "reward": 40, "penalty": 30, "punishment": "Penalty Zone: 50 extra sit-ups", "target": 100, "unit": "reps"},
+    {"name": "Squats", "reward": 40, "penalty": 30, "punishment": "Penalty Zone: 50 extra squats", "target": 100, "unit": "reps"},
+    {"name": "Run", "reward": 60, "penalty": 40, "punishment": "Penalty Zone: run 3 km extra", "target": 10, "unit": "km"},
 ]
+
+
+def haversine(lat1, lon1, lat2, lon2):
+    """Distance in meters between two GPS points."""
+    r = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    a = math.sin((p2 - p1) / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(math.radians(lon2 - lon1) / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
+
+
+class RunTracker:
+    """Turns raw GPS fixes into a distance, ignoring bad fixes and vehicle speeds."""
+    MAX_SPEED = 7.0     # m/s (~25 km/h). Faster than this is a vehicle or a GPS jump: not counted
+    MIN_STEP = 3.0      # meters. Smaller moves are GPS drift
+    MAX_ACCURACY = 30.0  # meters. Fixes less accurate than this are ignored
+
+    def __init__(self):
+        self.meters = 0.0
+        self.last = None
+        self.start = None
+
+    def update(self, lat, lon, accuracy=None, now=None):
+        now = time.time() if now is None else now
+        if self.start is None:
+            self.start = now
+        if accuracy is not None and accuracy > self.MAX_ACCURACY:
+            return self.meters
+        if self.last is None:
+            self.last = (lat, lon, now)
+            return self.meters
+        d = haversine(self.last[0], self.last[1], lat, lon)
+        if d < self.MIN_STEP:
+            return self.meters
+        speed = d / max(now - self.last[2], 0.001)
+        self.last = (lat, lon, now)
+        if speed <= self.MAX_SPEED:
+            self.meters += d
+        return self.meters
 
 
 def rank_for(level):
@@ -82,7 +120,8 @@ def text_to_habits(text):
 
 
 def quests_to_text(qs):
-    return "\n".join("%s | %d | %d | %s" % (q["name"], q["reward"], q["penalty"], q["punishment"]) for q in qs)
+    return "\n".join("%s | %d | %d | %s | %g | %s" % (q["name"], q["reward"], q["penalty"], q["punishment"],
+                                                       q.get("target", 1), q.get("unit", "")) for q in qs)
 
 
 def text_to_quests(text):
@@ -92,7 +131,9 @@ def text_to_quests(text):
         if len(p) < 4 or not p[0]:
             continue
         try:
-            out.append({"name": p[0], "reward": int(p[1]), "penalty": int(p[2]), "punishment": p[3]})
+            target = float(p[4]) if len(p) > 4 and p[4] else 1.0
+            out.append({"name": p[0], "reward": int(p[1]), "penalty": int(p[2]), "punishment": p[3],
+                        "target": max(target, 1.0), "unit": p[5] if len(p) > 5 else ""})
         except ValueError:
             continue
     return out
@@ -187,6 +228,7 @@ class Game:
             for q in d["quests"]:
                 if not q["done"]:
                     q["done"] = True
+                    q["progress"] = q.get("target", 1)
                     break
             else:
                 return "No open quest."
@@ -235,7 +277,7 @@ class Game:
     # ---- daily quests ----
     def new_cycle(self, start):
         self.d["cycle_start"] = start
-        self.d["quests"] = [dict(q, done=False) for q in self.d["templates"]]
+        self.d["quests"] = [dict(q, done=False, progress=0) for q in self.d["templates"]]
         self.arrived = True
 
     def complete_quest(self, i):
@@ -243,6 +285,7 @@ class Game:
         if q["done"]:
             return []
         q["done"] = True
+        q["progress"] = q.get("target", 1)
         msgs = ["Quest complete: %s  +%d EXP" % (q["name"], q["reward"])] + self.add_exp(q["reward"])
         self.d["gold"] += q["reward"] // 2
         self.d["counts"]["quests"] += 1
@@ -250,6 +293,31 @@ class Game:
         msgs += self.check_titles()
         self.save()
         return msgs
+
+    def add_progress(self, i, amount):
+        q = self.d["quests"][i]
+        if q["done"] or amount <= 0:
+            return []
+        target = q.get("target", 1)
+        q["progress"] = min(target, q.get("progress", 0) + amount)
+        if q["progress"] >= target:
+            return self.complete_quest(i)
+        self.save()
+        return []
+
+    def add_template(self, name, target, unit, reward, penalty, punishment):
+        t = {"name": name, "reward": reward, "penalty": penalty, "punishment": punishment,
+             "target": max(target, 1.0), "unit": unit}
+        self.d["templates"].append(t)
+        self.d["quests"].append(dict(t, done=False, progress=0))
+        self.save()
+
+    def add_run_km(self, km):
+        """Add tracked kilometers to the first open quest measured in km."""
+        for i, q in enumerate(self.d["quests"]):
+            if not q["done"] and q.get("unit", "").strip().lower() in ("km", "kilometer", "kilometers", "kilometre", "kilometres"):
+                return i, self.add_progress(i, round(km, 3))
+        return None, []
 
     def complete_punishment(self, i):
         if 0 <= i < len(self.d["punishments"]):
