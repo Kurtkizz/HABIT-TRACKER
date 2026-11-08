@@ -13,7 +13,7 @@ from kivy.uix.popup import Popup
 from kivy.uix.screenmanager import Screen
 from kivy.uix.textinput import TextInput
 
-from engine import Game, SHOP, TITLES, hp_max, rank_for, exp_needed, habits_to_text, text_to_habits, quests_to_text, text_to_quests
+from engine import Game, CATS, norm_cat, SHOP, TITLES, hp_max, rank_for, exp_needed, habits_to_text, text_to_habits, quests_to_text, text_to_quests
 
 Window.softinput_mode = "below_target"
 
@@ -85,7 +85,7 @@ KV = """
             padding: dp(12)
             L:
                 text: app.stats_text
-                halign: 'left'
+                halign: 'center'
                 valign: 'middle'
                 text_size: self.size
         L:
@@ -225,7 +225,7 @@ KV = """
                     text: 'FULL HEAL'
                     on_release: app.admin_heal()
             L:
-                text: 'Habit rules  (keywords, comma separated | EXP value | STAT)'
+                text: 'Habit rules  (keywords, comma separated | EXP value | Physical / Mental / Spiritual)'
                 text_size: self.width, None
                 halign: 'left'
                 valign: 'middle'
@@ -236,7 +236,7 @@ KV = """
                 size_hint_y: None
                 height: dp(260)
             L:
-                text: 'Daily quests  (name | reward | penalty | punishment | target | unit)'
+                text: 'Daily quests  (name | reward | penalty | punishment | target | unit | category)'
                 text_size: self.width, None
                 halign: 'left'
                 valign: 'middle'
@@ -299,11 +299,17 @@ KV = """
                 multiline: False
                 size_hint_y: None
                 height: dp(44)
+            TI:
+                id: q_cat
+                hint_text: 'Category: Physical, Mental or Spiritual'
+                multiline: False
+                size_hint_y: None
+                height: dp(44)
             SB:
                 text: 'ADD QUEST'
                 size_hint_y: None
                 height: dp(48)
-                on_release: app.admin_add_quest(q_name.text, q_target.text, q_unit.text, q_reward.text, q_penalty.text, q_punish.text)
+                on_release: app.admin_add_quest(q_name.text, q_target.text, q_unit.text, q_reward.text, q_penalty.text, q_punish.text, q_cat.text)
             TI:
                 id: name_in
                 hint_text: 'Player name'
@@ -463,9 +469,13 @@ class SoloSystemApp(App):
         self.hp_text = "HP  %d / %d" % (d["hp"], hm)
         self.hp_pct = d["hp"] * 100.0 / hm
         self.gold_text = "GOLD  %d" % d["gold"]
-        s = d["stats"]
-        self.stats_text = "\n".join("%-6s  %d" % (k, s[k]) for k in s)
-        self.extra_text = "Streak: %d days   |   Pending punishments: %d\nBuild 1.1" % (d["streak"], len(d["punishments"]))
+        a = d["attrs"]
+        tot = sum(a.values()) or 1
+        cols = {"Physical": "ff6b6b", "Mental": "6bb6ff", "Spiritual": "c08bff"}
+        self.stats_text = "\n\n".join(
+            "[color=%s]%s Attributes[/color]\n[size=28sp][b]%d[/b][/size]   (%d%%)" % (cols[k], k, a[k], round(a[k] * 100.0 / tot))
+            for k in CATS)
+        self.extra_text = "Streak: %d days   |   Pending punishments: %d\nBuild 1.2" % (d["streak"], len(d["punishments"]))
         self.log_text = "\n".join(d["log"]) or "No habits logged yet."
         self.build_quests()
         self.build_shop()
@@ -564,7 +574,11 @@ class SoloSystemApp(App):
         if h is None:
             self.ask_classify(text)
             return
-        self.show_result(self.g.apply_habit(text, h["value"], h.get("stat", "")))
+        cat = norm_cat(h.get("stat", ""))
+        if h["value"] > 0 and not cat:
+            self.ask_category(text, lambda c: self._log_known(h, text, c))
+            return
+        self.show_result(self.g.apply_habit(text, h["value"], cat))
 
     def show_result(self, msgs):
         self.result_text = msgs[0]
@@ -587,8 +601,30 @@ class SoloSystemApp(App):
 
     def classified(self, pop, text, val):
         pop.dismiss()
-        self.g.add_rule(text, val)
-        self.show_result(self.g.apply_habit(text, val))
+        if val > 0:
+            self.ask_category(text, lambda c: self._log_new(text, val, c))
+        else:
+            self._log_new(text, val, "")
+
+    def _log_new(self, text, val, cat):
+        self.g.add_rule(text, val, cat)
+        self.show_result(self.g.apply_habit(text, val, cat))
+
+    def _log_known(self, h, text, cat):
+        h["stat"] = cat
+        self.show_result(self.g.apply_habit(text, h["value"], cat))
+
+    def ask_category(self, text, callback):
+        box = BoxLayout(orientation="vertical", spacing=dp(6), padding=dp(8))
+        box.add_widget(Label(text="Which kind of habit is this?\n[b]%s[/b]" % text, markup=True, color=(0.7, 1, 1, 1)))
+        pop = Popup(title="[ SYSTEM ]", content=box, size_hint=(0.9, 0.6), title_color=(0.25, 0.85, 1, 1),
+                    separator_color=(0.25, 0.85, 1, 1), background_color=(0.02, 0.05, 0.12, 1))
+        for cat in CATS:
+            b = Button(text=cat.upper(), background_normal="", background_color=(0.05, 0.18, 0.35, 1),
+                       color=(0.6, 0.95, 1, 1), size_hint_y=None, height=dp(48))
+            b.bind(on_release=lambda w, c=cat: (pop.dismiss(), callback(c)))
+            box.add_widget(b)
+        pop.open()
 
     def quest_tapped(self, i):
         if self.g.d["quests"][i].get("target", 1) > 1:
@@ -817,7 +853,7 @@ class SoloSystemApp(App):
             self.g.save()
             self.refresh()
 
-    def admin_add_quest(self, name, target, unit, reward, penalty, punish):
+    def admin_add_quest(self, name, target, unit, reward, penalty, punish, category=""):
         name = name.strip()
         if not name:
             self.popup("[ ADMIN ]", "Enter a quest name first.")
@@ -827,9 +863,9 @@ class SoloSystemApp(App):
         except ValueError:
             self.popup("[ ADMIN ]", "Target, reward and penalty must be numbers.")
             return
-        self.g.add_template(name, t, unit.strip(), r, p, punish.strip() or "Penalty Zone: 30 push-ups")
+        self.g.add_template(name, t, unit.strip(), r, p, punish.strip() or "Penalty Zone: 30 push-ups", category)
         ids = self.screen("admin").ids
-        for k in ("q_name", "q_target", "q_unit", "q_reward", "q_penalty", "q_punish"):
+        for k in ("q_name", "q_target", "q_unit", "q_reward", "q_penalty", "q_punish", "q_cat"):
             ids[k].text = ""
         ids.quests_in.text = quests_to_text(self.g.d["templates"])
         self.refresh()

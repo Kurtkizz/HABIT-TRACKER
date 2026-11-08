@@ -3,7 +3,28 @@ import json, math, os, re, time
 DAY = 86400
 RANKS = [(1, "E"), (10, "D"), (20, "C"), (35, "B"), (50, "A"), (70, "S"),
          (90, "SS"), (120, "SSS"), (160, "Transcendent"), (200, "Absolute Apex")]
-STATS = ["STR", "AGI", "VIT", "INT", "SENSE"]
+STATS = ["STR", "AGI", "VIT", "INT", "SENSE"]  # legacy, kept so old saves still load
+CATS = ["Physical", "Mental", "Spiritual"]
+_LEGACY = {"STR": "Physical", "AGI": "Physical", "VIT": "Physical", "INT": "Mental", "SENSE": "Spiritual",
+           "P": "Physical", "M": "Mental", "S": "Spiritual"}
+
+
+def norm_cat(x):
+    x = (x or "").strip()
+    for c in CATS:
+        if x.lower() in (c.lower(), c.lower() + " attributes"):
+            return c
+    return _LEGACY.get(x.upper(), "")
+
+
+def guess_cat(name):
+    n = name.lower()
+    for words, cat in ((("push", "sit", "squat", "run", "walk", "jog", "gym", "workout", "exercise", "swim", "bike"), "Physical"),
+                       (("read", "study", "learn", "code", "write", "practice"), "Mental"),
+                       (("meditat", "pray", "journal", "gratitude", "breath"), "Spiritual")):
+        if any(w in n for w in words):
+            return cat
+    return ""
 
 # name, description, gold cost (items are used immediately on purchase)
 SHOP = {
@@ -31,11 +52,11 @@ def hp_max(level):
 
 # value > 0 = good (EXP gain), 0 = harmless/neutral, < 0 = bad (EXP loss)
 DEFAULT_HABITS = [
-    {"kw": ["workout", "exercise", "gym", "push-ups", "pushups", "sit-ups", "squats"], "value": 30, "stat": "STR"},
-    {"kw": ["run", "running", "jog", "jogging", "walk", "walking", "cardio"], "value": 25, "stat": "AGI"},
-    {"kw": ["study", "studied", "read", "reading", "learn", "coding", "practice"], "value": 25, "stat": "INT"},
-    {"kw": ["meditate", "meditation", "journal", "journaling"], "value": 20, "stat": "SENSE"},
-    {"kw": ["drink water", "drank water", "healthy meal", "vegetables", "cold shower", "slept early", "woke up early"], "value": 15, "stat": "VIT"},
+    {"kw": ["workout", "exercise", "gym", "push-ups", "pushups", "sit-ups", "squats"], "value": 30, "stat": "Physical"},
+    {"kw": ["run", "running", "jog", "jogging", "walk", "walking", "cardio"], "value": 25, "stat": "Physical"},
+    {"kw": ["study", "studied", "read", "reading", "learn", "coding", "practice"], "value": 25, "stat": "Mental"},
+    {"kw": ["meditate", "meditation", "journal", "journaling"], "value": 20, "stat": "Spiritual"},
+    {"kw": ["drink water", "drank water", "healthy meal", "vegetables", "cold shower", "slept early", "woke up early"], "value": 15, "stat": "Physical"},
     {"kw": ["junk food", "fast food", "soda", "overslept", "snack"], "value": 0, "stat": ""},
     {"kw": ["scrolling", "doomscroll", "tiktok", "social media", "procrastinated", "wasted time", "skipped workout"], "value": -10, "stat": ""},
     {"kw": ["stayed up late", "all-nighter", "skipped class"], "value": -15, "stat": ""},
@@ -43,10 +64,10 @@ DEFAULT_HABITS = [
 ]
 
 DEFAULT_QUESTS = [
-    {"name": "Push-ups", "reward": 40, "penalty": 30, "punishment": "Penalty Zone: 50 extra push-ups", "target": 100, "unit": "reps"},
-    {"name": "Sit-ups", "reward": 40, "penalty": 30, "punishment": "Penalty Zone: 50 extra sit-ups", "target": 100, "unit": "reps"},
-    {"name": "Squats", "reward": 40, "penalty": 30, "punishment": "Penalty Zone: 50 extra squats", "target": 100, "unit": "reps"},
-    {"name": "Run", "reward": 60, "penalty": 40, "punishment": "Penalty Zone: run 3 km extra", "target": 10, "unit": "km"},
+    {"name": "Push-ups", "reward": 40, "penalty": 30, "punishment": "Penalty Zone: 50 extra push-ups", "target": 100, "unit": "reps", "stat": "Physical"},
+    {"name": "Sit-ups", "reward": 40, "penalty": 30, "punishment": "Penalty Zone: 50 extra sit-ups", "target": 100, "unit": "reps", "stat": "Physical"},
+    {"name": "Squats", "reward": 40, "penalty": 30, "punishment": "Penalty Zone: 50 extra squats", "target": 100, "unit": "reps", "stat": "Physical"},
+    {"name": "Run", "reward": 60, "penalty": 40, "punishment": "Penalty Zone: run 3 km extra", "target": 10, "unit": "km", "stat": "Physical"},
 ]
 
 
@@ -101,7 +122,7 @@ def exp_needed(level):
 
 
 def habits_to_text(habits):
-    return "\n".join("%s | %d | %s" % (", ".join(h["kw"]), h["value"], h.get("stat", "")) for h in habits)
+    return "\n".join("%s | %d | %s" % (", ".join(h["kw"]), h["value"], norm_cat(h.get("stat", ""))) for h in habits)
 
 
 def text_to_habits(text):
@@ -114,14 +135,14 @@ def text_to_habits(text):
             val = int(p[1])
         except ValueError:
             continue
-        stat = p[2].upper() if len(p) > 2 and p[2].upper() in STATS else ""
+        stat = norm_cat(p[2]) if len(p) > 2 else ""
         out.append({"kw": [k.strip().lower() for k in p[0].split(",") if k.strip()], "value": val, "stat": stat})
     return out
 
 
 def quests_to_text(qs):
-    return "\n".join("%s | %d | %d | %s | %g | %s" % (q["name"], q["reward"], q["penalty"], q["punishment"],
-                                                       q.get("target", 1), q.get("unit", "")) for q in qs)
+    return "\n".join("%s | %d | %d | %s | %g | %s | %s" % (q["name"], q["reward"], q["penalty"], q["punishment"],
+                                                       q.get("target", 1), q.get("unit", ""), q.get("stat", "")) for q in qs)
 
 
 def text_to_quests(text):
@@ -133,7 +154,8 @@ def text_to_quests(text):
         try:
             target = float(p[4]) if len(p) > 4 and p[4] else 1.0
             out.append({"name": p[0], "reward": int(p[1]), "penalty": int(p[2]), "punishment": p[3],
-                        "target": max(target, 1.0), "unit": p[5] if len(p) > 5 else ""})
+                        "target": max(target, 1.0), "unit": p[5] if len(p) > 5 else "",
+                        "stat": norm_cat(p[6]) if len(p) > 6 and p[6] else guess_cat(p[0])})
         except ValueError:
             continue
     return out
@@ -150,7 +172,7 @@ class Game:
     def default(self):
         return {
             "name": "Player", "level": 1, "exp": 0, "pin": "0000", "streak": 0,
-            "stats": {s: 1 for s in STATS},
+            "attrs": {c: 0 for c in CATS},
             "habits": [dict(h) for h in DEFAULT_HABITS],
             "templates": [dict(q) for q in DEFAULT_QUESTS],
             "cycle_start": time.time(), "quests": [], "punishments": [], "log": [],
@@ -165,6 +187,14 @@ class Game:
                 self.d = json.load(f)
         except Exception:
             self.d = base
+        if "attrs" not in self.d:  # migrate old STR/AGI/... saves
+            s = self.d.get("stats", {})
+            self.d["attrs"] = {"Physical": max(0, s.get("STR", 1) + s.get("AGI", 1) + s.get("VIT", 1) - 3),
+                               "Mental": max(0, s.get("INT", 1) - 1), "Spiritual": max(0, s.get("SENSE", 1) - 1)}
+        for key in ("templates", "quests"):
+            for q in self.d.get(key, []):
+                if "stat" not in q:
+                    q["stat"] = guess_cat(q.get("name", ""))
         for k, v in base.items():
             self.d.setdefault(k, v)
         if not self.d["quests"]:
@@ -255,9 +285,13 @@ class Game:
         if value > 0:
             msgs += self.add_exp(value)
             self.d["gold"] += value // 2
-            if stat in self.d["stats"]:
-                self.d["stats"][stat] += 1
-            res = "[GOOD] +%d EXP" % value
+            cat = norm_cat(stat)
+            pts = 2 if value >= 40 else 1
+            if cat:
+                self.d["attrs"][cat] += pts
+                res = "[GOOD] +%d EXP, %s +%d" % (value, cat, pts)
+            else:
+                res = "[GOOD] +%d EXP" % value
         elif value < 0:
             self.lose_exp(-value)
             msgs += self.lose_hp(-value // 2)
@@ -271,8 +305,8 @@ class Game:
         self.save()
         return [res] + msgs
 
-    def add_rule(self, text, value):
-        self.d["habits"].append({"kw": [text.lower().strip()], "value": value, "stat": ""})
+    def add_rule(self, text, value, stat=""):
+        self.d["habits"].append({"kw": [text.lower().strip()], "value": value, "stat": norm_cat(stat)})
 
     # ---- daily quests ----
     def new_cycle(self, start):
@@ -288,6 +322,10 @@ class Game:
         q["progress"] = q.get("target", 1)
         msgs = ["Quest complete: %s  +%d EXP" % (q["name"], q["reward"])] + self.add_exp(q["reward"])
         self.d["gold"] += q["reward"] // 2
+        cat = norm_cat(q.get("stat", ""))
+        if cat:
+            self.d["attrs"][cat] += 2
+            msgs.append("%s +2" % cat)
         self.d["counts"]["quests"] += 1
         self.heal(5)
         msgs += self.check_titles()
@@ -305,9 +343,10 @@ class Game:
         self.save()
         return []
 
-    def add_template(self, name, target, unit, reward, penalty, punishment):
+    def add_template(self, name, target, unit, reward, penalty, punishment, category=""):
         t = {"name": name, "reward": reward, "penalty": penalty, "punishment": punishment,
-             "target": max(target, 1.0), "unit": unit}
+             "target": max(target, 1.0), "unit": unit,
+             "stat": norm_cat(category) or guess_cat(name)}
         self.d["templates"].append(t)
         self.d["quests"].append(dict(t, done=False, progress=0))
         self.save()
