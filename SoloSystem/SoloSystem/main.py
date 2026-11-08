@@ -226,16 +226,22 @@ KV = """
                     on_release: app.admin_heal()
             L:
                 text: 'Habit rules  (keywords, comma separated | EXP value | STAT)'
+                text_size: self.width, None
+                halign: 'left'
+                valign: 'middle'
                 size_hint_y: None
-                height: dp(24)
+                height: dp(46)
             TI:
                 id: habits_in
                 size_hint_y: None
                 height: dp(260)
             L:
                 text: 'Daily quests  (name | reward | penalty | punishment | target | unit)'
+                text_size: self.width, None
+                halign: 'left'
+                valign: 'middle'
                 size_hint_y: None
-                height: dp(24)
+                height: dp(46)
             TI:
                 id: quests_in
                 size_hint_y: None
@@ -307,6 +313,7 @@ KV = """
             TI:
                 id: pin_in
                 hint_text: 'New admin PIN'
+                password: True
                 multiline: False
                 size_hint_y: None
                 height: dp(44)
@@ -458,7 +465,7 @@ class SoloSystemApp(App):
         self.gold_text = "GOLD  %d" % d["gold"]
         s = d["stats"]
         self.stats_text = "\n".join("%-6s  %d" % (k, s[k]) for k in s)
-        self.extra_text = "Streak: %d days   |   Pending punishments: %d" % (d["streak"], len(d["punishments"]))
+        self.extra_text = "Streak: %d days   |   Pending punishments: %d\nBuild 1.1" % (d["streak"], len(d["punishments"]))
         self.log_text = "\n".join(d["log"]) or "No habits logged yet."
         self.build_quests()
         self.build_shop()
@@ -596,7 +603,8 @@ class SoloSystemApp(App):
         box.add_widget(Label(text="[b]%s[/b]\n%g / %g %s done" % (q["name"], done, target, q.get("unit", "")),
                              markup=True, color=(0.7, 1, 1, 1)))
         inp = TextInput(hint_text="Amount to add (e.g. 20)", input_filter="float", multiline=False,
-                        size_hint_y=None, height=dp(44))
+                        size_hint_y=None, height=dp(44), background_color=(0.02, 0.05, 0.12, 1),
+                        foreground_color=(0.7, 1, 1, 1), cursor_color=(0.3, 0.9, 1, 1))
         box.add_widget(inp)
         row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
         pop = Popup(title="[ ADD PROGRESS ]", content=box, size_hint=(0.9, 0.5), title_color=(0.25, 0.85, 1, 1),
@@ -642,8 +650,9 @@ class SoloSystemApp(App):
         from engine import RunTracker
         self.tracker = RunTracker()
         self.running = False
+        self.gps_fixes, self.gps_acc, self.gps_status = 0, None, ""
         box = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
-        self.run_label = Label(text="0.00 km\n00:00\nPress START", font_size="22sp", halign="center",
+        self.run_label = Label(text="0.00 km\n00:00\nGo outside with open sky,\nthen press START", font_size="18sp", halign="center",
                                color=(0.7, 1, 1, 1))
         box.add_widget(self.run_label)
         row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(6))
@@ -672,7 +681,7 @@ class SoloSystemApp(App):
     def _start_gps(self):
         try:
             from plyer import gps
-            gps.configure(on_location=self.on_gps, on_status=lambda *a, **k: None)
+            gps.configure(on_location=self.on_gps, on_status=self.on_gps_status)
             gps.start(minTime=1000, minDistance=0)
         except Exception as e:
             self.popup("[ GPS ]", "GPS is not available here.\n%s" % e)
@@ -685,14 +694,27 @@ class SoloSystemApp(App):
     def on_gps(self, **kw):  # called from the GPS thread: only update numbers here
         lat, lon = kw.get("lat"), kw.get("lon")
         if lat is not None and lon is not None:
+            self.gps_fixes += 1
+            self.gps_acc = kw.get("accuracy")
             self.tracker.update(float(lat), float(lon), kw.get("accuracy"))
+
+    def on_gps_status(self, *args, **kw):
+        if len(args) >= 2:
+            self.gps_status = "%s: %s" % (args[0], args[1])
 
     def run_tick(self, dt):
         if not self.running:
             return False
         s = int(time.time() - self.run_t0)
-        note = "" if self.tracker.last else "\nWaiting for GPS signal..."
-        self.run_label.text = "%.2f km\n%02d:%02d%s" % (self.tracker.meters / 1000.0, s // 60, s % 60, note)
+        acc = "-" if self.gps_acc is None else "%d m" % self.gps_acc
+        if self.tracker.last:
+            note = "Tracking"
+        elif self.gps_fixes:
+            note = "Signal too weak - move to open sky"
+        else:
+            note = "Waiting for GPS (can take 1 minute)"
+        self.run_label.text = "%.2f km\n%02d:%02d\n%s\nFixes: %d   Accuracy: %s\n%s" % (
+            self.tracker.meters / 1000.0, s // 60, s % 60, note, self.gps_fixes, acc, self.gps_status)
 
     def stop_gps(self):
         if self.running:
@@ -744,7 +766,9 @@ class SoloSystemApp(App):
             self.load_admin()
             return
         box = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
-        pin = TextInput(hint_text="Admin PIN", password=True, multiline=False, size_hint_y=None, height=dp(44))
+        pin = TextInput(hint_text="Admin PIN", password=True, multiline=False, size_hint_y=None, height=dp(44),
+                        background_color=(0.02, 0.05, 0.12, 1), foreground_color=(0.7, 1, 1, 1),
+                        cursor_color=(0.3, 0.9, 1, 1))
         ok = Button(text="UNLOCK", size_hint_y=None, height=dp(44), background_normal="",
                     background_color=(0.05, 0.18, 0.35, 1), color=(0.6, 0.95, 1, 1))
         box.add_widget(pin)
