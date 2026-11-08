@@ -13,7 +13,7 @@ from kivy.uix.popup import Popup
 from kivy.uix.screenmanager import Screen
 from kivy.uix.textinput import TextInput
 
-from engine import Game, CATS, norm_cat, SHOP, TITLES, hp_max, rank_for, exp_needed, habits_to_text, text_to_habits, quests_to_text, text_to_quests
+from engine import Game, due_from, CATS, norm_cat, SHOP, TITLES, hp_max, rank_for, exp_needed, habits_to_text, text_to_habits, quests_to_text, text_to_quests
 
 Window.softinput_mode = "below_target"
 
@@ -153,6 +153,24 @@ KV = """
         ScrollView:
             GridLayout:
                 id: quest_box
+                cols: 1
+                spacing: dp(8)
+                size_hint_y: None
+                height: self.minimum_height
+
+<TasksScreen>:
+    BoxLayout:
+        orientation: 'vertical'
+        padding: dp(12)
+        spacing: dp(8)
+        L:
+            text: '[b][ ROUTINE & TO-DO ][/b]'
+            font_size: '22sp'
+            size_hint_y: None
+            height: dp(40)
+        ScrollView:
+            GridLayout:
+                id: task_box
                 cols: 1
                 spacing: dp(8)
                 size_hint_y: None
@@ -354,6 +372,8 @@ BoxLayout:
             name: 'status'
         LogScreen:
             name: 'log'
+        TasksScreen:
+            name: 'tasks'
         QuestScreen:
             name: 'quests'
         ShopScreen:
@@ -365,18 +385,27 @@ BoxLayout:
         height: dp(56)
         spacing: dp(2)
         SB:
+            font_size: '12sp'
             text: 'STATUS'
             on_release: sm.current = 'status'
         SB:
+            font_size: '12sp'
             text: 'LOG'
             on_release: sm.current = 'log'
         SB:
+            font_size: '12sp'
+            text: 'TASKS'
+            on_release: sm.current = 'tasks'
+        SB:
+            font_size: '12sp'
             text: 'QUESTS'
             on_release: sm.current = 'quests'
         SB:
+            font_size: '12sp'
             text: 'SHOP'
             on_release: sm.current = 'shop'
         SB:
+            font_size: '12sp'
             text: 'ADMIN'
             on_release: app.open_admin()
 """
@@ -395,6 +424,10 @@ class QuestScreen(Screen):
 
 
 class AdminScreen(Screen):
+    pass
+
+
+class TasksScreen(Screen):
     pass
 
 
@@ -418,6 +451,7 @@ class SoloSystemApp(App):
     gold_text = StringProperty("")
 
     admin_unlocked = False
+    _after_log = None
 
     def build(self):
         self.title = "The System"
@@ -475,10 +509,11 @@ class SoloSystemApp(App):
         self.stats_text = "\n\n".join(
             "[color=%s]%s Attributes[/color]\n[size=28sp][b]%d[/b][/size]   (%d%%)" % (cols[k], k, a[k], round(a[k] * 100.0 / tot))
             for k in CATS)
-        self.extra_text = "Streak: %d days   |   Pending punishments: %d\nBuild 1.2" % (d["streak"], len(d["punishments"]))
+        self.extra_text = "Streak: %d days   |   Pending punishments: %d\nBuild 1.3" % (d["streak"], len(d["punishments"]))
         self.log_text = "\n".join(d["log"]) or "No habits logged yet."
         self.build_quests()
         self.build_shop()
+        self.build_tasks()
 
     def mkbtn(self, text, cb, dis=False, color=(0.05, 0.18, 0.35, 1)):
         b = Button(text=text, size_hint_y=None, height=dp(64), background_normal="", disabled=dis,
@@ -564,12 +599,25 @@ class SoloSystemApp(App):
         if 0 < self.g.remaining() < 7200 and self.g.warned != d["cycle_start"] and any(not q["done"] for q in d["quests"]):
             self.g.warned = d["cycle_start"]
             self.notify("WARNING", "Less than 2 hours left to finish your daily quests!")
+        due = self.g.due_todos()
+        if due:
+            self.refresh()
+            self.notify("REMINDER", "; ".join(t["text"] for t in due))
+            self.popup("[ REMINDER ]", "Time to do:\n[b]%s[/b]\n\nTap it in the TASKS tab when it is done." %
+                       "\n".join(t["text"] for t in due))
 
     # ---------- player actions ----------
     def log_habit(self, text):
         text = text.strip()
         if not text:
             return
+        self._after_log = None
+        self.dialog("[ SYSTEM ]", "Did you already do this?\n[b]%s[/b]" % text,
+                    [("YES, I DID IT", lambda v: self.process_habit(text)),
+                     ("NOT YET  (add to to-do)", lambda v: self.ask_reminder(text)),
+                     ("CANCEL", lambda v: None)], size=(0.9, 0.55))
+
+    def process_habit(self, text):
         h = self.g.detect(text)
         if h is None:
             self.ask_classify(text)
@@ -582,8 +630,13 @@ class SoloSystemApp(App):
 
     def show_result(self, msgs):
         self.result_text = msgs[0]
+        cb, self._after_log = self._after_log, None
+        if cb:
+            cb()
         self.refresh()
-        if len(msgs) > 1:
+        if self.root_widget.ids.sm.current != "log":
+            self.popup("[ LOGGED ]", "\n".join(msgs))
+        elif len(msgs) > 1:
             self.popup("[ SYSTEM ]", "\n".join(msgs[1:]))
 
     def ask_classify(self, text):
@@ -680,6 +733,110 @@ class SoloSystemApp(App):
     def finish_punishment(self, i):
         self.g.complete_punishment(i)
         self.refresh()
+
+    # ---------- routine + to-do ----------
+    def dialog(self, title, text, buttons, hint=None, size=(0.9, 0.5)):
+        """Popup with optional text box. Each button callback gets the typed text; return False to keep it open."""
+        box = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
+        box.add_widget(Label(text=text, markup=True, color=(0.7, 1, 1, 1), halign="center"))
+        inp = None
+        if hint:
+            inp = TextInput(hint_text=hint, multiline=False, size_hint_y=None, height=dp(44),
+                            background_color=(0.02, 0.05, 0.12, 1), foreground_color=(0.7, 1, 1, 1),
+                            cursor_color=(0.3, 0.9, 1, 1))
+            box.add_widget(inp)
+        pop = Popup(title=title, content=box, size_hint=size, title_color=(0.25, 0.85, 1, 1),
+                    separator_color=(0.25, 0.85, 1, 1), background_color=(0.02, 0.05, 0.12, 1))
+
+        def press(w, cb):
+            if cb(inp.text if inp is not None else "") is not False:
+                pop.dismiss()
+        for label, cb in buttons:
+            b = Button(text=label, size_hint_y=None, height=dp(48), background_normal="",
+                       background_color=(0.05, 0.18, 0.35, 1), color=(0.6, 0.95, 1, 1))
+            b.bind(on_release=lambda w, cb=cb: press(w, cb))
+            box.add_widget(b)
+        pop.open()
+
+    def ask_reminder(self, text):
+        def save(v, tomorrow):
+            due = due_from(v, tomorrow)
+            if due is None:
+                self.popup("[ REMINDER ]", "Type a time like 07:30 or 6:15pm.")
+                return False
+            self.save_todo(text, due)
+        self.dialog("[ TO-DO ]", "When should I remind you?\n[b]%s[/b]" % text,
+                    [("REMIND ME  (next time it hits)", lambda v: save(v, False)),
+                     ("REMIND TOMORROW", lambda v: save(v, True)),
+                     ("NO REMINDER", lambda v: self.save_todo(text, None))],
+                    hint="Time, e.g. 07:30 or 6:15pm", size=(0.92, 0.7))
+
+    def save_todo(self, text, due):
+        self.g.add_todo(text, due)
+        self.refresh()
+        when = "no reminder" if not due else "reminder " + time.strftime("%b %d, %H:%M", time.localtime(due))
+        self.popup("[ TO-DO ]", "Saved: [b]%s[/b]\n(%s)\nFind it in the TASKS tab." % (text, when))
+
+    def header(self, text):
+        return Label(text="[b]%s[/b]" % text, markup=True, size_hint_y=None, height=dp(30), color=(1, 0.85, 0.3, 1))
+
+    def task_row(self, text, on_tap, on_del, disabled=False, color=(0.05, 0.18, 0.35, 1)):
+        row = BoxLayout(size_hint_y=None, height=dp(62), spacing=dp(4))
+        main = Button(text=text, background_normal="", background_color=color, color=(0.6, 0.95, 1, 1),
+                      disabled=disabled, halign="center")
+        main.bind(width=lambda w, v: setattr(w, "text_size", (v - 16, None)))
+        main.bind(on_release=lambda w: on_tap())
+        x = Button(text="X", size_hint_x=None, width=dp(48), background_normal="",
+                   background_color=(0.4, 0.05, 0.08, 1), color=(1, 0.8, 0.8, 1))
+        x.bind(on_release=lambda w: on_del())
+        row.add_widget(main)
+        row.add_widget(x)
+        return row
+
+    def build_tasks(self):
+        box = self.screen("tasks").ids.task_box
+        box.clear_widgets()
+        d, now = self.g.d, time.time()
+        box.add_widget(self.header("ROUTINE  (tap = log it, once a day)"))
+        for r in d["routines"]:
+            done = self.g.routine_done_today(r)
+            box.add_widget(self.task_row(("[X]  " if done else "[  ]  ") + r["text"],
+                                         lambda r=r: self.tap_routine(r),
+                                         lambda r=r: (self.g.remove_routine(r["id"]), self.refresh()),
+                                         disabled=done, color=(0.05, 0.3, 0.2, 1) if done else (0.05, 0.18, 0.35, 1)))
+        box.add_widget(self.mkbtn("+ ADD ROUTINE", lambda w: self.dialog(
+            "[ ROUTINE ]", "Something you do every day.\nIt logs with one tap.",
+            [("ADD", self.save_routine), ("CANCEL", lambda v: None)], hint="e.g. Meditate, Brush teeth")))
+        box.add_widget(self.header("TO-DO  (tap when you have done it)"))
+        for t in d["todos"]:
+            due = t.get("due")
+            when = "No reminder" if not due else "Remind: " + time.strftime("%b %d, %H:%M", time.localtime(due))
+            late = bool(due) and due <= now
+            box.add_widget(self.task_row("%s\n%s" % (t["text"], when), lambda t=t: self.tap_todo(t),
+                                         lambda t=t: (self.g.remove_todo(t["id"]), self.refresh()),
+                                         color=(0.4, 0.1, 0.12, 1) if late else (0.05, 0.18, 0.35, 1)))
+        box.add_widget(self.mkbtn("+ ADD TO-DO", lambda w: self.dialog(
+            "[ TO-DO ]", "What do you need to do?",
+            [("NEXT", self.todo_next), ("CANCEL", lambda v: None)], hint="e.g. Run 5 km")))
+
+    def save_routine(self, v):
+        if not v.strip():
+            return False
+        self.g.add_routine(v)
+        self.refresh()
+
+    def todo_next(self, v):
+        if not v.strip():
+            return False
+        self.ask_reminder(v.strip())
+
+    def tap_routine(self, r):
+        self._after_log = lambda: self.g.mark_routine(r["id"])
+        self.process_habit(r["text"])
+
+    def tap_todo(self, t):
+        self._after_log = lambda: self.g.remove_todo(t["id"])
+        self.process_habit(t["text"])
 
     # ---------- GPS run tracker ----------
     def open_run(self):

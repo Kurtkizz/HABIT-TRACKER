@@ -26,6 +26,12 @@ def check(path, state, now):
     elif 0 < left < 7200 and undone and state.get("warned") != start:
         state["warned"] = start
         out.append(("WARNING", "Less than 2 hours left to finish your daily quests!"))
+    sent = state.setdefault("todos", set())
+    for t in d.get("todos", []):
+        due = t.get("due")
+        if due and 0 <= now - due < 6 * 3600 and not t.get("notified") and t.get("id") not in sent:
+            sent.add(t.get("id"))
+            out.append(("REMINDER", t.get("text", "To-do")))
     return out
 
 

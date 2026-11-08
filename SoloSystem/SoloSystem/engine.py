@@ -1,4 +1,4 @@
-import json, math, os, re, time
+import datetime, json, math, os, re, time
 
 DAY = 86400
 RANKS = [(1, "E"), (10, "D"), (20, "C"), (35, "B"), (50, "A"), (70, "S"),
@@ -7,6 +7,27 @@ STATS = ["STR", "AGI", "VIT", "INT", "SENSE"]  # legacy, kept so old saves still
 CATS = ["Physical", "Mental", "Spiritual"]
 _LEGACY = {"STR": "Physical", "AGI": "Physical", "VIT": "Physical", "INT": "Mental", "SENSE": "Spiritual",
            "P": "Physical", "M": "Mental", "S": "Spiritual"}
+
+
+def due_from(text, tomorrow=False, now=None):
+    """'7:30', '0730', '6:15pm' -> timestamp of the next time it happens (or tomorrow). None if invalid."""
+    m = re.match(r"^\s*(\d{1,2})(?::?(\d{2}))?\s*(am|pm)?\s*$", (text or "").lower())
+    if not m:
+        return None
+    h, mi, ap = int(m.group(1)), int(m.group(2) or 0), m.group(3)
+    if ap == "pm" and h < 12:
+        h += 12
+    if ap == "am" and h == 12:
+        h = 0
+    if h > 23 or mi > 59:
+        return None
+    now_dt = datetime.datetime.fromtimestamp(time.time() if now is None else now)
+    due = now_dt.replace(hour=h, minute=mi, second=0, microsecond=0)
+    if tomorrow:
+        due += datetime.timedelta(days=1)
+    elif due <= now_dt:
+        due += datetime.timedelta(days=1)
+    return due.timestamp()
 
 
 def norm_cat(x):
@@ -177,6 +198,7 @@ class Game:
             "templates": [dict(q) for q in DEFAULT_QUESTS],
             "cycle_start": time.time(), "quests": [], "punishments": [], "log": [],
             "hp": hp_max(1), "gold": 0, "title": "Weakest Hunter", "titles": ["Weakest Hunter"],
+            "routines": [], "todos": [], "next_id": 1,
             "best_streak": 0, "counts": {"habits": 0, "quests": 0, "deaths": 0},
         }
 
@@ -357,6 +379,47 @@ class Game:
             if not q["done"] and q.get("unit", "").strip().lower() in ("km", "kilometer", "kilometers", "kilometre", "kilometres"):
                 return i, self.add_progress(i, round(km, 3))
         return None, []
+
+    # ---- routine + to-do ----
+    def _new_id(self):
+        n = self.d["next_id"]
+        self.d["next_id"] = n + 1
+        return n
+
+    def add_routine(self, text):
+        self.d["routines"].append({"id": self._new_id(), "text": text.strip(), "last_done": ""})
+        self.save()
+
+    def remove_routine(self, rid):
+        self.d["routines"] = [r for r in self.d["routines"] if r["id"] != rid]
+        self.save()
+
+    def routine_done_today(self, r):
+        return r.get("last_done") == time.strftime("%Y-%m-%d")
+
+    def mark_routine(self, rid):
+        for r in self.d["routines"]:
+            if r["id"] == rid:
+                r["last_done"] = time.strftime("%Y-%m-%d")
+        self.save()
+
+    def add_todo(self, text, due=None):
+        self.d["todos"].append({"id": self._new_id(), "text": text.strip(), "due": due, "notified": False})
+        self.save()
+
+    def remove_todo(self, tid):
+        self.d["todos"] = [t for t in self.d["todos"] if t["id"] != tid]
+        self.save()
+
+    def due_todos(self, now=None):
+        """To-dos whose reminder time has come (each is returned once)."""
+        now = time.time() if now is None else now
+        due = [t for t in self.d["todos"] if t.get("due") and t["due"] <= now and not t.get("notified")]
+        for t in due:
+            t["notified"] = True
+        if due:
+            self.save()
+        return due
 
     def complete_punishment(self, i):
         if 0 <= i < len(self.d["punishments"]):
