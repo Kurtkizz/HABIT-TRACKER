@@ -5,13 +5,13 @@ package.domain = org.hunter
 source.dir = .
 source.include_exts = py,png,jpg,kv,json
 version = 1.0
-requirements = python3,kivy==2.3.0,plyer,pyjnius,android
+requirements = python3,kivy==2.3.0,plyer,pyjnius,android,certifi
 orientation = portrait
 fullscreen = 0
 icon.filename = %(source.dir)s/icon.png
 presplash.filename = %(source.dir)s/presplash.png
 android.presplash_color = #020510
-android.permissions = POST_NOTIFICATIONS,VIBRATE,FOREGROUND_SERVICE,WAKE_LOCK,ACCESS_FINE_LOCATION,ACCESS_COARSE_LOCATION
+android.permissions = INTERNET,POST_NOTIFICATIONS,VIBRATE,FOREGROUND_SERVICE,WAKE_LOCK,ACCESS_FINE_LOCATION,ACCESS_COARSE_LOCATION
 services = Quest:service.py:foreground:sticky
 android.api = 33
 android.minapi = 21

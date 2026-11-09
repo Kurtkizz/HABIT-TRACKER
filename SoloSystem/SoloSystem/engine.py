@@ -1,12 +1,18 @@
 import datetime, json, math, os, re, time
 
 DAY = 86400
+WARN_HOURS = (3, 1)  # quest warnings: 3 hours and 1 hour before the 24h run out
 RANKS = [(1, "E"), (10, "D"), (20, "C"), (35, "B"), (50, "A"), (70, "S"),
          (90, "SS"), (120, "SSS"), (160, "Transcendent"), (200, "Absolute Apex")]
 STATS = ["STR", "AGI", "VIT", "INT", "SENSE"]  # legacy, kept so old saves still load
 CATS = ["Physical", "Mental", "Spiritual"]
 _LEGACY = {"STR": "Physical", "AGI": "Physical", "VIT": "Physical", "INT": "Mental", "SENSE": "Spiritual",
            "P": "Physical", "M": "Mental", "S": "Spiritual"}
+
+
+def hours_text(secs):
+    secs = max(0, int(secs))
+    return "%dh %02dm" % (secs // 3600, secs % 3600 // 60)
 
 
 def due_from(text, tomorrow=False, now=None):
@@ -183,12 +189,12 @@ def text_to_quests(text):
 
 
 class Game:
-    def __init__(self, path):
+    def __init__(self, path, write=True):
         self.path = path
         self.d = {}
         self.arrived = False
         self.warned = 0
-        self.load()
+        self.load(save=write)
 
     def default(self):
         return {
@@ -199,10 +205,11 @@ class Game:
             "cycle_start": time.time(), "quests": [], "punishments": [], "log": [],
             "hp": hp_max(1), "gold": 0, "title": "Weakest Hunter", "titles": ["Weakest Hunter"],
             "routines": [], "todos": [], "next_id": 1,
+            "unseen_arrival": False, "warn": {"cycle": 0, "sent": []},
             "best_streak": 0, "counts": {"habits": 0, "quests": 0, "deaths": 0},
         }
 
-    def load(self):
+    def load(self, save=True):
         base = self.default()
         try:
             with open(self.path) as f:
@@ -221,7 +228,11 @@ class Game:
             self.d.setdefault(k, v)
         if not self.d["quests"]:
             self.new_cycle(self.d["cycle_start"])
-        self.save()
+        if save:
+            self.save()
+
+    def reload(self):
+        self.load(save=False)
 
     def save(self):
         tmp = self.path + ".tmp"
@@ -379,6 +390,35 @@ class Game:
             if not q["done"] and q.get("unit", "").strip().lower() in ("km", "kilometer", "kilometers", "kilometre", "kilometres"):
                 return i, self.add_progress(i, round(km, 3))
         return None, []
+
+    # ---- warnings / summaries ----
+    def warning_due(self, now=None):
+        """Seconds left if a 3h / 1h warning is due now (each is given once per cycle), else None."""
+        now = time.time() if now is None else now
+        left = self.d["cycle_start"] + DAY - now
+        w = self.d.setdefault("warn", {"cycle": 0, "sent": []})
+        if w.get("cycle") != self.d["cycle_start"]:
+            w["cycle"], w["sent"] = self.d["cycle_start"], []
+        if left <= 0 or all(q["done"] for q in self.d["quests"]):
+            return None
+        crossed = [h for h in WARN_HOURS if left <= h * 3600 and h not in w["sent"]]
+        if not crossed:
+            return None
+        w["sent"] = sorted(set(w["sent"]) | set(crossed))
+        self.save()
+        return left
+
+    def unfinished_text(self):
+        parts = []
+        for q in self.d["quests"]:
+            if q["done"]:
+                continue
+            t = q.get("target", 1)
+            parts.append(("%s %g/%g %s" % (q["name"], q.get("progress", 0), t, q.get("unit", ""))).strip() if t > 1 else q["name"])
+        return ", ".join(parts)
+
+    def quest_names(self):
+        return ", ".join(q["name"] for q in self.d["quests"])
 
     # ---- routine + to-do ----
     def _new_id(self):
