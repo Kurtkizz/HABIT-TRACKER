@@ -17,7 +17,7 @@ def go():
             raise
         if d in sys.path:
             sys.path.remove(d)
-        for m in ("service_main", "engine"):
+        for m in ("service_main", "engine", "notifier"):
             sys.modules.pop(m, None)
         import service_main
         service_main.main()

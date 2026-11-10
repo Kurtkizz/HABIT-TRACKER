@@ -69,13 +69,16 @@ def step(g, folder, state, notify, now, unlocked):
 
 def main():
     folder = os.environ.get("PYTHON_SERVICE_ARGUMENT", "")
-    from plyer import notification
-
     def notify(title, text):
         try:
-            notification.notify(title=title, message=text, app_name="The System", timeout=10)
+            import notifier
+            notifier.send(title, text)
         except Exception:
-            pass
+            try:
+                from plyer import notification
+                notification.notify(title=title, message=text, app_name="The System", timeout=10)
+            except Exception:
+                pass
     g = Game(os.path.join(folder, "system.json"), write=False)
     state = {}
     while True:

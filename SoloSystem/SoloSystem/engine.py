@@ -204,7 +204,7 @@ class Game:
             "templates": [dict(q) for q in DEFAULT_QUESTS],
             "cycle_start": time.time(), "quests": [], "punishments": [], "log": [],
             "hp": hp_max(1), "gold": 0, "title": "Weakest Hunter", "titles": ["Weakest Hunter"],
-            "routines": [], "todos": [], "next_id": 1,
+            "routines": [], "todos": [], "next_id": 1, "journal": [],
             "unseen_arrival": False, "warn": {"cycle": 0, "sent": []},
             "best_streak": 0, "counts": {"habits": 0, "quests": 0, "deaths": 0},
         }
@@ -419,6 +419,22 @@ class Game:
 
     def quest_names(self):
         return ", ".join(q["name"] for q in self.d["quests"])
+
+    # ---- journal ----
+    def journaled_today(self):
+        today = time.strftime("%Y-%m-%d")
+        return any(time.strftime("%Y-%m-%d", time.localtime(e["ts"])) == today for e in self.d["journal"])
+
+    def add_journal(self, text):
+        """Saves an entry. Returns True if it is the first entry today (that one earns EXP)."""
+        first = not self.journaled_today()
+        self.d["journal"].append({"id": self._new_id(), "ts": time.time(), "text": text.strip()})
+        self.save()
+        return first
+
+    def remove_journal(self, jid):
+        self.d["journal"] = [e for e in self.d["journal"] if e["id"] != jid]
+        self.save()
 
     # ---- routine + to-do ----
     def _new_id(self):

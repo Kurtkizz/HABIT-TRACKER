@@ -18,6 +18,10 @@ from engine import Game, due_from, hours_text, CATS, norm_cat, SHOP, TITLES, hp_
 
 import loader
 import updater
+try:
+    import notifier
+except ImportError:
+    notifier = None
 
 Window.softinput_mode = "below_target"
 
@@ -179,6 +183,34 @@ KV = """
                 spacing: dp(8)
                 size_hint_y: None
                 height: self.minimum_height
+
+<JournalScreen>:
+    BoxLayout:
+        orientation: 'vertical'
+        padding: dp(12)
+        spacing: dp(8)
+        L:
+            text: '[b][ JOURNAL BOOK ][/b]'
+            font_size: '22sp'
+            size_hint_y: None
+            height: dp(40)
+        SB:
+            text: '+ WRITE NEW ENTRY'
+            size_hint_y: None
+            height: dp(52)
+            on_release: app.write_journal()
+        ScrollView:
+            GridLayout:
+                id: journal_box
+                cols: 1
+                spacing: dp(8)
+                size_hint_y: None
+                height: self.minimum_height
+        SB:
+            text: 'BACK'
+            size_hint_y: None
+            height: dp(48)
+            on_release: app.go('tasks')
 
 <ShopScreen>:
     BoxLayout:
@@ -363,6 +395,11 @@ KV = """
                 size_hint_y: None
                 height: dp(44)
             SB:
+                text: 'TEST NOTIFICATION'
+                size_hint_y: None
+                height: dp(48)
+                on_release: app.test_notification()
+            SB:
                 text: 'CHECK FOR UPDATES'
                 size_hint_y: None
                 height: dp(48)
@@ -394,6 +431,8 @@ BoxLayout:
             name: 'log'
         TasksScreen:
             name: 'tasks'
+        JournalScreen:
+            name: 'journal'
         QuestScreen:
             name: 'quests'
         ShopScreen:
@@ -451,6 +490,10 @@ class TasksScreen(Screen):
     pass
 
 
+class JournalScreen(Screen):
+    pass
+
+
 class ShopScreen(Screen):
     pass
 
@@ -500,10 +543,32 @@ class SoloSystemApp(App):
 
     def notify(self, title, text):
         try:
-            from plyer import notification
-            notification.notify(title=title, message=text, app_name="The System", timeout=10)
+            notifier.send(title, text)
         except Exception:
-            pass
+            try:
+                from plyer import notification
+                notification.notify(title=title, message=text, app_name="The System", timeout=10)
+            except Exception:
+                pass
+
+    def test_notification(self):
+        try:
+            if notifier is None:
+                raise RuntimeError("notifier.py is missing - install the newest APK")
+            try:
+                from android.permissions import request_permissions
+                request_permissions(["android.permission.POST_NOTIFICATIONS"])
+            except ImportError:
+                pass
+            if notifier.enabled() is False:
+                self.dialog("[ NOTIFICATIONS ]", "Notifications are turned off for this app.\nOpen settings and switch them on.",
+                            [("OPEN SETTINGS", lambda v: notifier.open_settings()), ("BACK", lambda v: None)],
+                            size=(0.9, 0.45))
+                return
+            notifier.send("[SYSTEM] Test", "If you can read this in your notification bar, alerts work.")
+            self.popup("[ TEST ]", "Test notification sent.\\nPull down your notification bar to look.")
+        except Exception as e:
+            self.popup("[ NOTIFICATIONS ]", "Could not send: %s" % e)
 
     def beat(self):
         try:
@@ -570,11 +635,12 @@ class SoloSystemApp(App):
         self.stats_text = "\n\n".join(
             "[color=%s]%s Attributes[/color]\n[size=28sp][b]%d[/b][/size]   (%d%%)" % (cols[k], k, a[k], round(a[k] * 100.0 / tot))
             for k in CATS)
-        self.extra_text = "Streak: %d days   |   Pending punishments: %d\nBuild 1.4 (%s)" % (d["streak"], len(d["punishments"]), updater.code_label())
+        self.extra_text = "Streak: %d days   |   Pending punishments: %d\nBuild 1.5 (%s)" % (d["streak"], len(d["punishments"]), updater.code_label())
         self.log_text = "\n".join(d["log"]) or "No habits logged yet."
         self.build_quests()
         self.build_shop()
         self.build_tasks()
+        self.build_journal()
 
     def mkbtn(self, text, cb, dis=False, color=(0.05, 0.18, 0.35, 1)):
         b = Button(text=text, size_hint_y=None, height=dp(64), background_normal="", disabled=dis,
@@ -681,19 +747,31 @@ class SoloSystemApp(App):
         if not text:
             return
         self._after_log = None
-        self.dialog("[ SYSTEM ]", "Did you already do this?\n[b]%s[/b]" % text,
-                    [("YES, I DID IT", lambda v: self.process_habit(text)),
-                     ("NOT YET  (add to to-do)", lambda v: self.ask_reminder(text)),
-                     ("CANCEL", lambda v: None)], size=(0.9, 0.55))
+        self.ask_done(text)
 
-    def process_habit(self, text):
+    def ask_done(self, text):
+        self.dialog("[ SYSTEM ]", "Did you already do this?\n[b]%s[/b]" % text,
+                    [("YES, I DID IT", lambda v: self.process_habit(text, back=lambda: self.ask_done(text))),
+                     ("NOT YET  (add to to-do)", lambda v: self.ask_reminder(text, back=lambda: self.ask_done(text))),
+                     ("BACK", lambda v: self.restore_log_text(text))], size=(0.9, 0.55))
+
+    def restore_log_text(self, text):
+        self.screen("log").ids.habit_in.text = text
+
+    def _back_button(self, box, pop, back):
+        b = Button(text="BACK", background_normal="", background_color=(0.25, 0.1, 0.1, 1),
+                   color=(1, 0.8, 0.8, 1), size_hint_y=None, height=dp(44))
+        b.bind(on_release=lambda w: (pop.dismiss(), back() if back else None))
+        box.add_widget(b)
+
+    def process_habit(self, text, back=None):
         h = self.g.detect(text)
         if h is None:
-            self.ask_classify(text)
+            self.ask_classify(text, back)
             return
         cat = norm_cat(h.get("stat", ""))
         if h["value"] > 0 and not cat:
-            self.ask_category(text, lambda c: self._log_known(h, text, c))
+            self.ask_category(text, lambda c: self._log_known(h, text, c), back)
             return
         self.show_result(self.g.apply_habit(text, h["value"], cat))
 
@@ -708,7 +786,7 @@ class SoloSystemApp(App):
         elif len(msgs) > 1:
             self.popup("[ SYSTEM ]", "\n".join(msgs[1:]))
 
-    def ask_classify(self, text):
+    def ask_classify(self, text, back=None):
         box = BoxLayout(orientation="vertical", spacing=dp(6), padding=dp(8))
         box.add_widget(Label(text="Unknown habit. Classify it:\n[b]%s[/b]" % text, markup=True,
                              color=(0.7, 1, 1, 1)))
@@ -717,14 +795,15 @@ class SoloSystemApp(App):
         for label, val in (("EXCELLENT  +40", 40), ("GOOD  +20", 20), ("NEUTRAL  0", 0), ("BAD  -10", -10), ("SEVERE  -40", -40)):
             b = Button(text=label, background_normal="", background_color=(0.05, 0.18, 0.35, 1),
                        color=(0.6, 0.95, 1, 1), size_hint_y=None, height=dp(44))
-            b.bind(on_release=lambda w, v=val: self.classified(pop, text, v))
+            b.bind(on_release=lambda w, v=val: self.classified(pop, text, v, back))
             box.add_widget(b)
+        self._back_button(box, pop, back)
         pop.open()
 
-    def classified(self, pop, text, val):
+    def classified(self, pop, text, val, back=None):
         pop.dismiss()
         if val > 0:
-            self.ask_category(text, lambda c: self._log_new(text, val, c))
+            self.ask_category(text, lambda c: self._log_new(text, val, c), back=lambda: self.ask_classify(text, back))
         else:
             self._log_new(text, val, "")
 
@@ -736,16 +815,17 @@ class SoloSystemApp(App):
         h["stat"] = cat
         self.show_result(self.g.apply_habit(text, h["value"], cat))
 
-    def ask_category(self, text, callback):
+    def ask_category(self, text, callback, back=None):
         box = BoxLayout(orientation="vertical", spacing=dp(6), padding=dp(8))
         box.add_widget(Label(text="Which kind of habit is this?\n[b]%s[/b]" % text, markup=True, color=(0.7, 1, 1, 1)))
-        pop = Popup(title="[ SYSTEM ]", content=box, size_hint=(0.9, 0.6), title_color=(0.25, 0.85, 1, 1),
+        pop = Popup(title="[ SYSTEM ]", content=box, size_hint=(0.9, 0.7), title_color=(0.25, 0.85, 1, 1),
                     separator_color=(0.25, 0.85, 1, 1), background_color=(0.02, 0.05, 0.12, 1))
         for cat in CATS:
             b = Button(text=cat.upper(), background_normal="", background_color=(0.05, 0.18, 0.35, 1),
                        color=(0.6, 0.95, 1, 1), size_hint_y=None, height=dp(48))
             b.bind(on_release=lambda w, c=cat: (pop.dismiss(), callback(c)))
             box.add_widget(b)
+        self._back_button(box, pop, back)
         pop.open()
 
     def quest_tapped(self, i):
@@ -804,13 +884,15 @@ class SoloSystemApp(App):
         self.refresh()
 
     # ---------- routine + to-do ----------
-    def dialog(self, title, text, buttons, hint=None, size=(0.9, 0.5)):
+    def dialog(self, title, text, buttons, hint=None, size=(0.9, 0.5), multiline=False, height=dp(44),
+               text_in="", readonly=False):
         """Popup with optional text box. Each button callback gets the typed text; return False to keep it open."""
         box = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
         box.add_widget(Label(text=text, markup=True, color=(0.7, 1, 1, 1), halign="center"))
         inp = None
-        if hint:
-            inp = TextInput(hint_text=hint, multiline=False, size_hint_y=None, height=dp(44),
+        if hint is not None:
+            inp = TextInput(hint_text=hint, text=text_in, readonly=readonly, multiline=multiline, size_hint_y=None,
+                            height=height,
                             background_color=(0.02, 0.05, 0.12, 1), foreground_color=(0.7, 1, 1, 1),
                             cursor_color=(0.3, 0.9, 1, 1))
             box.add_widget(inp)
@@ -827,7 +909,7 @@ class SoloSystemApp(App):
             box.add_widget(b)
         pop.open()
 
-    def ask_reminder(self, text):
+    def ask_reminder(self, text, back=None):
         def save(v, tomorrow):
             due = due_from(v, tomorrow)
             if due is None:
@@ -837,8 +919,9 @@ class SoloSystemApp(App):
         self.dialog("[ TO-DO ]", "When should I remind you?\n[b]%s[/b]" % text,
                     [("REMIND ME  (next time it hits)", lambda v: save(v, False)),
                      ("REMIND TOMORROW", lambda v: save(v, True)),
-                     ("NO REMINDER", lambda v: self.save_todo(text, None))],
-                    hint="Time, e.g. 07:30 or 6:15pm", size=(0.92, 0.7))
+                     ("NO REMINDER", lambda v: self.save_todo(text, None)),
+                     ("BACK", lambda v: back() if back else None)],
+                    hint="Time, e.g. 07:30 or 6:15pm", size=(0.92, 0.8))
 
     def save_todo(self, text, due):
         self.g.add_todo(text, due)
@@ -866,6 +949,7 @@ class SoloSystemApp(App):
         box = self.screen("tasks").ids.task_box
         box.clear_widgets()
         d, now = self.g.d, time.time()
+        box.add_widget(self.mkbtn("OPEN JOURNAL BOOK", lambda w: self.open_journal()))
         box.add_widget(self.header("ROUTINE  (tap = log it, once a day)"))
         for r in d["routines"]:
             done = self.g.routine_done_today(r)
@@ -888,6 +972,48 @@ class SoloSystemApp(App):
             "[ TO-DO ]", "What do you need to do?",
             [("NEXT", self.todo_next), ("CANCEL", lambda v: None)], hint="e.g. Run 5 km")))
 
+    def go(self, name):
+        self.root_widget.ids.sm.current = name
+
+    def open_journal(self):
+        self.refresh()
+        self.go("journal")
+
+    def write_journal(self):
+        def save(v):
+            if not v.strip():
+                return False
+            first = self.g.add_journal(v)
+            self.refresh()
+            if first:
+                self._after_log = None
+                self.process_habit("Finished journal entry")  # also shows up in the LOG tab
+            else:
+                self.popup("[ JOURNAL ]", "Entry saved.\n(Journal EXP is given once per day.)")
+        self.dialog("[ JOURNAL ]", "Write your entry.", [("SAVE", save), ("BACK", lambda v: None)],
+                    hint="Today I...", multiline=True, height=dp(220), size=(0.95, 0.85))
+
+    def build_journal(self):
+        box = self.screen("journal").ids.journal_box
+        box.clear_widgets()
+        entries = sorted(self.g.d["journal"], key=lambda e: e["ts"], reverse=True)
+        if not entries:
+            box.add_widget(Label(text="No entries yet.", size_hint_y=None, height=dp(60), color=(0.6, 0.95, 1, 1)))
+        for e in entries:
+            lines = e["text"].strip().splitlines() or [""]
+            label = "%s\n%s" % (time.strftime("%b %d, %Y  %H:%M", time.localtime(e["ts"])), lines[0][:60])
+            box.add_widget(self.mkbtn(label, lambda w, e=e: self.read_journal(e)))
+
+    def read_journal(self, e):
+        self.dialog("[ JOURNAL ]", time.strftime("%b %d, %Y  %H:%M", time.localtime(e["ts"])),
+                    [("CLOSE", lambda v: None), ("DELETE", lambda v: self.delete_journal(e))],
+                    hint="", text_in=e["text"], readonly=True, multiline=True, height=dp(240), size=(0.95, 0.85))
+
+    def delete_journal(self, e):
+        self.dialog("[ JOURNAL ]", "Delete this entry for good?",
+                    [("YES, DELETE", lambda v: (self.g.remove_journal(e["id"]), self.refresh())),
+                     ("BACK", lambda v: self.read_journal(e))], size=(0.9, 0.4))
+
     def save_routine(self, v):
         if not v.strip():
             return False
@@ -900,12 +1026,20 @@ class SoloSystemApp(App):
         self.ask_reminder(v.strip())
 
     def tap_routine(self, r):
+        self.dialog("[ ROUTINE ]", "Log this routine as done?\n[b]%s[/b]" % r["text"],
+                    [("YES, LOG IT", lambda v: self.do_routine(r)), ("BACK", lambda v: None)], size=(0.9, 0.4))
+
+    def do_routine(self, r):
         self._after_log = lambda: self.g.mark_routine(r["id"])
-        self.process_habit(r["text"])
+        self.process_habit(r["text"], back=lambda: self.tap_routine(r))
 
     def tap_todo(self, t):
+        self.dialog("[ TO-DO ]", "Mark as done and log it?\n[b]%s[/b]" % t["text"],
+                    [("YES, LOG IT", lambda v: self.do_todo(t)), ("BACK", lambda v: None)], size=(0.9, 0.4))
+
+    def do_todo(self, t):
         self._after_log = lambda: self.g.remove_todo(t["id"])
-        self.process_habit(t["text"])
+        self.process_habit(t["text"], back=lambda: self.tap_todo(t))
 
     # ---------- GPS run tracker ----------
     def open_run(self):

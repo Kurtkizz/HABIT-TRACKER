@@ -6,7 +6,7 @@ import shutil
 import sys
 import time
 
-UPDATE_FILES = ["app_main.py", "engine.py", "service_main.py"]
+UPDATE_FILES = ["app_main.py", "engine.py", "service_main.py", "notifier.py"]
 REPO_RAW = os.environ.get(
     "SOLO_REPO_RAW", "https://raw.githubusercontent.com/Kurtkizz/HABIT-TRACKER/main/SoloSystem/SoloSystem/")
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -50,7 +50,7 @@ def discard(reason=""):
 
 
 def _purge():
-    for m in ("app_main", "engine", "service_main"):
+    for m in ("app_main", "engine", "service_main", "notifier"):
         sys.modules.pop(m, None)
 
 
