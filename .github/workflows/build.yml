@@ -26,6 +26,17 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install buildozer cython==0.29.36 virtualenv
+      - name: Restore permanent signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.DEBUG_KEYSTORE_B64 }}
+        run: |
+          mkdir -p ~/.android
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | tr -d ' \r\n' | base64 -d > ~/.android/debug.keystore
+            echo "Permanent signing key restored."
+          else
+            echo "::warning::Secret DEBUG_KEYSTORE_B64 not found - this build gets a temporary key and cannot update the installed app."
+          fi
       - name: Build APK
         shell: bash
         working-directory: SoloSystem/SoloSystem
@@ -33,6 +44,10 @@ jobs:
           echo "JAVA_HOME=$JAVA_HOME"
           java -version
           buildozer -v android debug 2>&1 | tee build.log
+      - name: Show signing key of the APK
+        working-directory: SoloSystem/SoloSystem
+        run: |
+          keytool -printcert -jarfile bin/*.apk | grep -E "Owner|SHA256" || true
       - name: Show Gradle error
         if: failure()
         working-directory: SoloSystem/SoloSystem
