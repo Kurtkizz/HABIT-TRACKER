@@ -518,7 +518,7 @@ class SoloSystemApp(App):
     _after_log = None
 
     def build(self):
-        self.title = "The System"
+        self.title = "Atomic System"
         self.beat()
         self.g = Game(os.path.join(self.user_data_dir, "system.json"))
         self.root_widget = Builder.load_string(KV)
