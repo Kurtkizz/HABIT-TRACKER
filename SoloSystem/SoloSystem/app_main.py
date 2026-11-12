@@ -14,7 +14,7 @@ from kivy.uix.popup import Popup
 from kivy.uix.screenmanager import Screen
 from kivy.uix.textinput import TextInput
 
-from engine import Game, due_from, hours_text, CATS, norm_cat, SHOP, TITLES, hp_max, rank_for, exp_needed, habits_to_text, text_to_habits, quests_to_text, text_to_quests
+from engine import Game, due_from, hours_text, today_str, tomorrow_str, CATS, norm_cat, SHOP, TITLES, hp_max, rank_for, exp_needed, habits_to_text, text_to_habits, quests_to_text, text_to_quests
 
 import loader
 import updater
@@ -202,6 +202,34 @@ KV = """
         ScrollView:
             GridLayout:
                 id: journal_box
+                cols: 1
+                spacing: dp(8)
+                size_hint_y: None
+                height: self.minimum_height
+        SB:
+            text: 'BACK'
+            size_hint_y: None
+            height: dp(48)
+            on_release: app.go('tasks')
+
+<PlannerScreen>:
+    BoxLayout:
+        orientation: 'vertical'
+        padding: dp(12)
+        spacing: dp(8)
+        L:
+            text: '[b][ TOMORROW PLANNER ][/b]'
+            font_size: '22sp'
+            size_hint_y: None
+            height: dp(40)
+        SB:
+            text: '+ ADD TO TOMORROW'
+            size_hint_y: None
+            height: dp(52)
+            on_release: app.add_plan_dialog()
+        ScrollView:
+            GridLayout:
+                id: planner_box
                 cols: 1
                 spacing: dp(8)
                 size_hint_y: None
@@ -433,6 +461,8 @@ BoxLayout:
             name: 'tasks'
         JournalScreen:
             name: 'journal'
+        PlannerScreen:
+            name: 'planner'
         QuestScreen:
             name: 'quests'
         ShopScreen:
@@ -494,6 +524,10 @@ class JournalScreen(Screen):
     pass
 
 
+class PlannerScreen(Screen):
+    pass
+
+
 class ShopScreen(Screen):
     pass
 
@@ -518,7 +552,7 @@ class SoloSystemApp(App):
     _after_log = None
 
     def build(self):
-        self.title = "Atomic System"
+        self.title = "The System"
         self.beat()
         self.g = Game(os.path.join(self.user_data_dir, "system.json"))
         self.root_widget = Builder.load_string(KV)
@@ -635,12 +669,13 @@ class SoloSystemApp(App):
         self.stats_text = "\n\n".join(
             "[color=%s]%s Attributes[/color]\n[size=28sp][b]%d[/b][/size]   (%d%%)" % (cols[k], k, a[k], round(a[k] * 100.0 / tot))
             for k in CATS)
-        self.extra_text = "Streak: %d days   |   Pending punishments: %d\nBuild 1.5 (%s)" % (d["streak"], len(d["punishments"]), updater.code_label())
+        self.extra_text = "Streak: %d days   |   Pending punishments: %d\nBuild 1.6 (%s)" % (d["streak"], len(d["punishments"]), updater.code_label())
         self.log_text = "\n".join(d["log"]) or "No habits logged yet."
         self.build_quests()
         self.build_shop()
         self.build_tasks()
         self.build_journal()
+        self.build_planner()
 
     def mkbtn(self, text, cb, dis=False, color=(0.05, 0.18, 0.35, 1)):
         b = Button(text=text, size_hint_y=None, height=dp(64), background_normal="", disabled=dis,
@@ -950,6 +985,7 @@ class SoloSystemApp(App):
         box.clear_widgets()
         d, now = self.g.d, time.time()
         box.add_widget(self.mkbtn("OPEN JOURNAL BOOK", lambda w: self.open_journal()))
+        box.add_widget(self.mkbtn("OPEN TOMORROW PLANNER", lambda w: self.open_planner()))
         box.add_widget(self.header("ROUTINE  (tap = log it, once a day)"))
         for r in d["routines"]:
             done = self.g.routine_done_today(r)
@@ -974,6 +1010,36 @@ class SoloSystemApp(App):
 
     def go(self, name):
         self.root_widget.ids.sm.current = name
+
+    def open_planner(self):
+        self.g.clean_plans()
+        self.refresh()
+        self.go("planner")
+
+    def add_plan_dialog(self, again=False):
+        def save(v):
+            if not v.strip():
+                return False
+            self.g.add_plan(tomorrow_str(), v)
+            self.refresh()
+            self.add_plan_dialog(again=True)  # stay in add mode so you can plan several things quickly
+        intro = "Added! Add another, or press BACK when you are done." if again else "What will you do tomorrow?"
+        self.dialog("[ PLANNER ]", intro + "\nStart with a time if you like:\n7:30 Gym    or    6pm Study",
+                    [("ADD", save), ("BACK", lambda v: None)], hint="e.g. 7:30 Gym", size=(0.92, 0.6))
+
+    def build_planner(self):
+        box = self.screen("planner").ids.planner_box
+        box.clear_widgets()
+        for label, date in (("TOMORROW", tomorrow_str()), ("TODAY", today_str())):
+            box.add_widget(self.header("%s  (%s)" % (label, time.strftime("%b %d", time.strptime(date, "%Y-%m-%d")))))
+            items = self.g.plans_for(date)
+            if not items:
+                box.add_widget(Label(text="Nothing planned.", size_hint_y=None, height=dp(36), color=(0.5, 0.7, 0.8, 1)))
+            for p in items:
+                text = ("[X]  " if p["done"] else "[  ]  ") + (p["time"] + "   " if p["time"] else "") + p["text"]
+                box.add_widget(self.task_row(text, lambda p=p: (self.g.toggle_plan(p["id"]), self.refresh()),
+                                             lambda p=p: (self.g.remove_plan(p["id"]), self.refresh()),
+                                             color=(0.05, 0.3, 0.2, 1) if p["done"] else (0.05, 0.18, 0.35, 1)))
 
     def open_journal(self):
         self.refresh()

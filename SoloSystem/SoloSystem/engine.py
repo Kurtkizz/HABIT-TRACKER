@@ -10,6 +10,31 @@ _LEGACY = {"STR": "Physical", "AGI": "Physical", "VIT": "Physical", "INT": "Ment
            "P": "Physical", "M": "Mental", "S": "Spiritual"}
 
 
+def today_str():
+    return datetime.date.today().isoformat()
+
+
+def tomorrow_str():
+    return (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
+
+
+def parse_plan(text):
+    """'7:30 Gym', '6pm Study', '6:15pm Read' -> ('07:30', 'Gym'). No time -> ('', text)."""
+    m = re.match(r"^\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*(.+)$", text, re.I)
+    if not m:
+        m = re.match(r"^\s*(\d{1,2}):(\d{2})()\s+(.+)$", text)
+    if not m:
+        return "", text.strip()
+    h, mi, ap, rest = int(m.group(1)), int(m.group(2) or 0), (m.group(3) or "").lower(), m.group(4).strip()
+    if ap == "pm" and h < 12:
+        h += 12
+    if ap == "am" and h == 12:
+        h = 0
+    if h > 23 or mi > 59 or not rest:
+        return "", text.strip()
+    return "%02d:%02d" % (h, mi), rest
+
+
 def hours_text(secs):
     secs = max(0, int(secs))
     return "%dh %02dm" % (secs // 3600, secs % 3600 // 60)
@@ -204,7 +229,7 @@ class Game:
             "templates": [dict(q) for q in DEFAULT_QUESTS],
             "cycle_start": time.time(), "quests": [], "punishments": [], "log": [],
             "hp": hp_max(1), "gold": 0, "title": "Weakest Hunter", "titles": ["Weakest Hunter"],
-            "routines": [], "todos": [], "next_id": 1, "journal": [],
+            "routines": [], "todos": [], "next_id": 1, "journal": [], "plans": [],
             "unseen_arrival": False, "warn": {"cycle": 0, "sent": []},
             "best_streak": 0, "counts": {"habits": 0, "quests": 0, "deaths": 0},
         }
@@ -419,6 +444,36 @@ class Game:
 
     def quest_names(self):
         return ", ".join(q["name"] for q in self.d["quests"])
+
+    # ---- planner (not part of the log: no EXP) ----
+    def add_plan(self, date, text):
+        when, task = parse_plan(text)
+        if not task:
+            return
+        self.d["plans"].append({"id": self._new_id(), "date": date, "time": when, "text": task, "done": False})
+        self.save()
+
+    def plans_for(self, date):
+        items = [p for p in self.d["plans"] if p["date"] == date]
+        return sorted(items, key=lambda p: (p["time"] == "", p["time"], p["id"]))
+
+    def toggle_plan(self, pid):
+        for p in self.d["plans"]:
+            if p["id"] == pid:
+                p["done"] = not p["done"]
+        self.save()
+
+    def remove_plan(self, pid):
+        self.d["plans"] = [p for p in self.d["plans"] if p["id"] != pid]
+        self.save()
+
+    def clean_plans(self):
+        """Drop plans older than yesterday."""
+        keep = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+        before = len(self.d["plans"])
+        self.d["plans"] = [p for p in self.d["plans"] if p["date"] >= keep]
+        if len(self.d["plans"]) != before:
+            self.save()
 
     # ---- journal ----
     def journaled_today(self):
