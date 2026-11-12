@@ -47,7 +47,9 @@ def step(g, folder, state, notify, now, unlocked):
         return
     g.reload()
     for m in g.tick():
-        notify("[SYSTEM] Quest Failed", m)
+        title = ("[SYSTEM] Level Up" if "LEVEL UP" in m else
+                 "[SYSTEM] Streak Bonus" if m.startswith("STREAK") else "[SYSTEM] Quest Failed")
+        notify(title, m)
     if g.arrived:
         g.arrived = False
         g.d["unseen_arrival"] = True

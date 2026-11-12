@@ -4,17 +4,20 @@ import time
 from kivy.app import App
 from kivy.lang import Builder
 from kivy.clock import Clock
+from kivy.core.clipboard import Clipboard
+from kivy.factory import Factory
 from kivy.core.window import Window
 from kivy.metrics import dp
 from kivy.properties import StringProperty, NumericProperty
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
+from kivy.uix.gridlayout import GridLayout
 from kivy.uix.label import Label
 from kivy.uix.popup import Popup
 from kivy.uix.screenmanager import Screen
 from kivy.uix.textinput import TextInput
 
-from engine import Game, due_from, hours_text, today_str, tomorrow_str, CATS, norm_cat, SHOP, TITLES, hp_max, rank_for, exp_needed, habits_to_text, text_to_habits, quests_to_text, text_to_quests
+from engine import Game, due_from, hours_text, today_str, tomorrow_str, CATS, norm_cat, SHOP, TITLES, hp_max, rank_for, exp_needed, log_line, days_text, habits_to_text, text_to_habits, quests_to_text, text_to_quests
 
 import loader
 import updater
@@ -99,7 +102,12 @@ KV = """
         L:
             text: app.extra_text
             size_hint_y: None
-            height: dp(40)
+            height: dp(48)
+        SB:
+            text: 'HISTORY'
+            size_hint_y: None
+            height: dp(44)
+            on_release: app.open_history()
 
 <LogScreen>:
     BoxLayout:
@@ -127,16 +135,18 @@ KV = """
             text: app.result_text
             size_hint_y: None
             height: dp(36)
-        Panel:
-            ScrollView:
-                L:
-                    text: app.log_text
-                    size_hint_y: None
-                    height: self.texture_size[1]
-                    text_size: self.width, None
-                    halign: 'left'
-                    valign: 'top'
-                    padding: dp(8), dp(8)
+        L:
+            text: 'Tap an entry to undo or rename it'
+            font_size: '12sp'
+            size_hint_y: None
+            height: dp(20)
+        ScrollView:
+            GridLayout:
+                id: log_box
+                cols: 1
+                spacing: dp(6)
+                size_hint_y: None
+                height: self.minimum_height
 
 <QuestScreen>:
     BoxLayout:
@@ -239,6 +249,48 @@ KV = """
             size_hint_y: None
             height: dp(48)
             on_release: app.go('tasks')
+
+<Bar@Widget>:
+    value: 0
+    canvas:
+        Color:
+            rgba: 0.55, 0.3, 1, 1
+        Rectangle:
+            pos: self.x, self.y + dp(4)
+            size: max(self.width * self.value, 1), self.height - dp(8)
+
+<Cell@Label>:
+    bg: 0.1, 0.1, 0.18, 1
+    color: 0.8, 0.95, 1, 1
+    canvas.before:
+        Color:
+            rgba: self.bg
+        Rectangle:
+            pos: self.x + dp(1), self.y + dp(1)
+            size: self.width - dp(2), self.height - dp(2)
+
+<HistoryScreen>:
+    BoxLayout:
+        orientation: 'vertical'
+        padding: dp(12)
+        spacing: dp(8)
+        L:
+            text: '[b][ HISTORY ][/b]'
+            font_size: '22sp'
+            size_hint_y: None
+            height: dp(40)
+        ScrollView:
+            GridLayout:
+                id: hist_box
+                cols: 1
+                spacing: dp(6)
+                size_hint_y: None
+                height: self.minimum_height
+        SB:
+            text: 'BACK'
+            size_hint_y: None
+            height: dp(48)
+            on_release: app.go('status')
 
 <ShopScreen>:
     BoxLayout:
@@ -423,6 +475,21 @@ KV = """
                 size_hint_y: None
                 height: dp(44)
             SB:
+                text: 'EXPORT BACKUP'
+                size_hint_y: None
+                height: dp(48)
+                on_release: app.export_backup()
+            SB:
+                text: 'RESTORE BACKUP'
+                size_hint_y: None
+                height: dp(48)
+                on_release: app.restore_backup()
+            SB:
+                text: 'TOGGLE QUEST SCALING'
+                size_hint_y: None
+                height: dp(48)
+                on_release: app.toggle_scaling()
+            SB:
                 text: 'TEST NOTIFICATION'
                 size_hint_y: None
                 height: dp(48)
@@ -463,6 +530,8 @@ BoxLayout:
             name: 'journal'
         PlannerScreen:
             name: 'planner'
+        HistoryScreen:
+            name: 'history'
         QuestScreen:
             name: 'quests'
         ShopScreen:
@@ -525,6 +594,10 @@ class JournalScreen(Screen):
 
 
 class PlannerScreen(Screen):
+    pass
+
+
+class HistoryScreen(Screen):
     pass
 
 
@@ -642,7 +715,17 @@ class SoloSystemApp(App):
         self.popup("[ UPDATE ]", "Live updates removed.\nClose the app and open it again to use the built-in code.")
 
     # ---------- helpers ----------
+    def vibrate(self, ms=400):
+        try:
+            notifier.vibrate(ms)
+        except Exception:
+            pass
+
     def popup(self, title, text, color=(0.25, 0.85, 1, 1)):
+        if "LEVEL UP" in text:
+            title, color = "[ LEVEL UP ]", (1, 0.85, 0.3, 1)
+            text = text.replace("LEVEL UP!", "[b]LEVEL UP![/b]")
+            self.vibrate()
         lab = Label(text=text, markup=True, color=(0.7, 1, 1, 1), halign="center")
         lab.bind(width=lambda w, v: setattr(w, "text_size", (v - 20, None)))
         Popup(title=title, content=lab, size_hint=(0.88, 0.45), title_color=color,
@@ -655,8 +738,9 @@ class SoloSystemApp(App):
         d = self.g.d
         need = exp_needed(d["level"])
         self.name_text = "[b]%s[/b]  <%s>" % (d["name"], d["title"])
-        self.level_text = "LEVEL  %d" % d["level"]
-        self.rank_text = "RANK  %s" % rank_for(d["level"])
+        pend = self.g.pending_trial_rank()
+        self.level_text = "LEVEL  %d" % d["level"] + ("   (Promotion Trial: Rank %s)" % pend if pend else "")
+        self.rank_text = "RANK  %s" % self.g.current_rank()
         self.exp_text = "EXP  %d / %d" % (d["exp"], need)
         self.exp_pct = d["exp"] * 100.0 / need
         hm = hp_max(d["level"])
@@ -669,13 +753,14 @@ class SoloSystemApp(App):
         self.stats_text = "\n\n".join(
             "[color=%s]%s Attributes[/color]\n[size=28sp][b]%d[/b][/size]   (%d%%)" % (cols[k], k, a[k], round(a[k] * 100.0 / tot))
             for k in CATS)
-        self.extra_text = "Streak: %d days   |   Pending punishments: %d\nBuild 1.6 (%s)" % (d["streak"], len(d["punishments"]), updater.code_label())
-        self.log_text = "\n".join(d["log"]) or "No habits logged yet."
+        self.extra_text = "Streak: %d days   |   Pending punishments: %d\nBuild 1.7 (%s)" % (d["streak"], len(d["punishments"]), updater.code_label())
+        self.log_text = ""
         self.build_quests()
         self.build_shop()
         self.build_tasks()
         self.build_journal()
         self.build_planner()
+        self.build_log()
 
     def mkbtn(self, text, cb, dis=False, color=(0.05, 0.18, 0.35, 1)):
         b = Button(text=text, size_hint_y=None, height=dp(64), background_normal="", disabled=dis,
@@ -692,6 +777,11 @@ class SoloSystemApp(App):
         box.add_widget(Label(text="[b]ITEMS[/b]", markup=True, size_hint_y=None, height=dp(28), color=(1, 0.85, 0.3, 1)))
         for key, (name, desc, cost) in SHOP.items():
             box.add_widget(self.mkbtn("%s - %s\nCost: %d gold" % (name, desc, cost), lambda w, k=key: self.buy(k)))
+        box.add_widget(Label(text="[b]MY REWARDS  (real life, you set the price)[/b]", markup=True, size_hint_y=None, height=dp(28), color=(1, 0.85, 0.3, 1)))
+        for r in d["rewards"]:
+            box.add_widget(self.task_row("%s\nCost: %d gold" % (r["name"], r["cost"]), lambda r=r: self.confirm_reward(r),
+                                         lambda r=r: (self.g.remove_reward(r["id"]), self.refresh())))
+        box.add_widget(self.mkbtn("+ ADD REWARD", lambda w: self.add_reward_dialog()))
         box.add_widget(Label(text="[b]TITLES (tap to equip)[/b]", markup=True, size_hint_y=None, height=dp(28), color=(1, 0.85, 0.3, 1)))
         for name, desc, cond in TITLES:
             if name in d["titles"]:
@@ -751,7 +841,7 @@ class SoloSystemApp(App):
         msgs = self.g.tick()
         self.refresh()
         if msgs:
-            self.popup("[ WARNING ]", "\n\n".join(msgs), (1, 0.3, 0.3, 1))
+            self.popup("[ DAILY REPORT ]", "\n\n".join(msgs), (1, 0.3, 0.3, 1))
         if self.g.arrived:
             self.g.arrived = False
             self.g.d["unseen_arrival"] = False
@@ -944,7 +1034,7 @@ class SoloSystemApp(App):
             box.add_widget(b)
         pop.open()
 
-    def ask_reminder(self, text, back=None):
+    def ask_reminder(self, text, back=None, prefill=""):
         def save(v, tomorrow):
             due = due_from(v, tomorrow)
             if due is None:
@@ -956,7 +1046,7 @@ class SoloSystemApp(App):
                      ("REMIND TOMORROW", lambda v: save(v, True)),
                      ("NO REMINDER", lambda v: self.save_todo(text, None)),
                      ("BACK", lambda v: back() if back else None)],
-                    hint="Time, e.g. 07:30 or 6:15pm", size=(0.92, 0.8))
+                    hint="Time, e.g. 07:30 or 6:15pm", text_in=prefill, size=(0.92, 0.8))
 
     def save_todo(self, text, due):
         self.g.add_todo(text, due)
@@ -967,7 +1057,7 @@ class SoloSystemApp(App):
     def header(self, text):
         return Label(text="[b]%s[/b]" % text, markup=True, size_hint_y=None, height=dp(30), color=(1, 0.85, 0.3, 1))
 
-    def task_row(self, text, on_tap, on_del, disabled=False, color=(0.05, 0.18, 0.35, 1)):
+    def task_row(self, text, on_tap, on_del, disabled=False, color=(0.05, 0.18, 0.35, 1), extra=None):
         row = BoxLayout(size_hint_y=None, height=dp(62), spacing=dp(4))
         main = Button(text=text, background_normal="", background_color=color, color=(0.6, 0.95, 1, 1),
                       disabled=disabled, halign="center")
@@ -977,6 +1067,11 @@ class SoloSystemApp(App):
                    background_color=(0.4, 0.05, 0.08, 1), color=(1, 0.8, 0.8, 1))
         x.bind(on_release=lambda w: on_del())
         row.add_widget(main)
+        if extra:
+            ex = Button(text=extra[0], size_hint_x=None, width=dp(66), background_normal="",
+                        background_color=(0.1, 0.3, 0.5, 1), color=(0.6, 0.95, 1, 1))
+            ex.bind(on_release=lambda w: extra[1]())
+            row.add_widget(ex)
         row.add_widget(x)
         return row
 
@@ -1007,9 +1102,175 @@ class SoloSystemApp(App):
         box.add_widget(self.mkbtn("+ ADD TO-DO", lambda w: self.dialog(
             "[ TO-DO ]", "What do you need to do?",
             [("NEXT", self.todo_next), ("CANCEL", lambda v: None)], hint="e.g. Run 5 km")))
+        self.build_quits(box)
 
     def go(self, name):
         self.root_widget.ids.sm.current = name
+
+    def build_quits(self, box):
+        box.add_widget(self.header("QUIT TRACKER  (days clean)"))
+        now = time.time()
+        for q in self.g.d["quits"]:
+            best = max(q.get("best", 0), now - q["since"])
+            box.add_widget(self.task_row("%s\n%s clean   (best %s)" % (q["name"], days_text(now - q["since"]), days_text(best)),
+                                         lambda q=q: self.dialog("[ QUIT TRACKER ]", "Did you slip on [b]%s[/b]?\nThis restarts the counter." % q["name"],
+                                                                 [("YES, I SLIPPED", lambda v: (self.g.slip_quit(q["id"]), self.refresh())),
+                                                                  ("BACK", lambda v: None)], size=(0.9, 0.4)),
+                                         lambda q=q: (self.g.remove_quit(q["id"]), self.refresh()),
+                                         color=(0.2, 0.12, 0.4, 1)))
+        box.add_widget(self.mkbtn("+ ADD SOMETHING TO QUIT", lambda w: self.dialog(
+            "[ QUIT TRACKER ]", "What do you want to quit?\nLogging a bad habit with this name restarts it.",
+            [("ADD", self.save_quit), ("BACK", lambda v: None)], hint="e.g. TikTok")))
+
+    def save_quit(self, v):
+        if not v.strip():
+            return False
+        self.g.add_quit(v)
+        self.refresh()
+
+    def build_log(self):
+        box = self.screen("log").ids.log_box
+        box.clear_widgets()
+        if not self.g.d["log"]:
+            box.add_widget(Label(text="No habits logged yet.", size_hint_y=None, height=dp(50), color=(0.6, 0.95, 1, 1)))
+        for i, e in enumerate(self.g.d["log"][:60]):
+            box.add_widget(self.mkbtn(log_line(e), lambda w, i=i: self.log_entry_menu(i)))
+
+    def log_entry_menu(self, i):
+        e = self.g.d["log"][i]
+        self.dialog("[ LOG ]", log_line(e), [("UNDO  (reverse the EXP)", lambda v: self.undo_entry(i)),
+                                              ("RENAME", lambda v: self.rename_entry(i)), ("BACK", lambda v: None)], size=(0.92, 0.6))
+
+    def undo_entry(self, i):
+        msg = self.g.undo_log(i)
+        self.refresh()
+        self.popup("[ LOG ]", msg)
+
+    def rename_entry(self, i):
+        e = self.g.d["log"][i]
+        if isinstance(e, str):
+            self.popup("[ LOG ]", "Entries from older versions can only be removed.")
+            return
+
+        def save(v):
+            if not v.strip():
+                return False
+            self.g.rename_log(i, v)
+            self.refresh()
+        self.dialog("[ LOG ]", "Rename this entry (EXP stays the same).", [("SAVE", save), ("BACK", lambda v: self.log_entry_menu(i))],
+                    hint="", text_in=e["text"])
+
+    def add_reward_dialog(self):
+        def save(v):
+            name, sep, cost = v.rpartition("|")
+            if not sep or not name.strip() or not cost.strip().isdigit() or int(cost) <= 0:
+                self.popup("[ REWARD ]", "Type it like:  Movie night | 300")
+                return False
+            self.g.add_reward(name, int(cost))
+            self.refresh()
+        self.dialog("[ REWARD ]", "Add a real-life reward and its price in gold.\nExample:  1 hour of gaming | 200",
+                    [("ADD", save), ("BACK", lambda v: None)], hint="Name | price", size=(0.92, 0.55))
+
+    def confirm_reward(self, r):
+        self.dialog("[ REWARD ]", "Spend [b]%d gold[/b] on:\n[b]%s[/b] ?" % (r["cost"], r["name"]),
+                    [("YES, CLAIM IT", lambda v: self.claim_reward(r)), ("BACK", lambda v: None)], size=(0.9, 0.4))
+
+    def claim_reward(self, r):
+        msg = self.g.redeem_reward(r["id"])
+        self.refresh()
+        self.popup("[ REWARD ]", msg)
+
+    def open_history(self):
+        self.build_history()
+        self.go("history")
+
+    def build_history(self):
+        import datetime
+        box = self.screen("history").ids.hist_box
+        box.clear_widgets()
+        d, hist, c = self.g.d, self.g.d["history"], self.g.d["counts"]
+        light = (0.6, 0.95, 1, 1)
+        box.add_widget(Label(text="Habits logged: %d     Quests done: %d\nStreak: %d days (best %d)     Deaths: %d     Rewards claimed: %d" % (
+            c["habits"], c["quests"], d["streak"], d["best_streak"], c["deaths"], len(d["redeemed"])),
+            size_hint_y=None, height=dp(56), color=light))
+        today = datetime.date.today()
+        days = [today - datetime.timedelta(days=i) for i in range(13, -1, -1)]
+        vals = [hist.get(x.isoformat(), {}).get("exp", 0) for x in days]
+        top = float(max(vals + [1]))
+        box.add_widget(self.header("EXP PER DAY  (last 14 days)"))
+        for x, v in zip(days, vals):
+            row = BoxLayout(size_hint_y=None, height=dp(24), spacing=dp(6))
+            row.add_widget(Label(text=x.strftime("%b %d"), size_hint_x=None, width=dp(64), color=light))
+            row.add_widget(Factory.Bar(value=v / top))
+            row.add_widget(Label(text=str(v), size_hint_x=None, width=dp(48), color=light))
+            box.add_widget(row)
+        week = {k: 0 for k in CATS}
+        for i in range(7):
+            for k, v in hist.get((today - datetime.timedelta(days=i)).isoformat(), {}).get("attrs", {}).items():
+                if k in week:
+                    week[k] += v
+        box.add_widget(self.header("ATTRIBUTE GROWTH  (last 7 days)"))
+        box.add_widget(Label(text="Physical +%d     Mental +%d     Spiritual +%d" % (week["Physical"], week["Mental"], week["Spiritual"]),
+                             size_hint_y=None, height=dp(32), color=light))
+        box.add_widget(self.header("CALENDAR  (green = every quest done)"))
+        first = today - datetime.timedelta(days=27)
+        grid = GridLayout(cols=7, size_hint_y=None, height=dp(40) * 6, spacing=dp(2))
+        for n in "MTWTFSS":
+            grid.add_widget(Label(text=n, size_hint_y=None, height=dp(24), color=light))
+        for _ in range(first.weekday()):
+            grid.add_widget(Label(text=""))
+        for i in range(28):
+            day = first + datetime.timedelta(days=i)
+            h = hist.get(day.isoformat())
+            bg = (0.1, 0.1, 0.18, 1)
+            if h and h.get("perfect"):
+                bg = (0.1, 0.55, 0.3, 1)
+            elif h and (h.get("habits") or h.get("quests")):
+                bg = (0.15, 0.3, 0.65, 1)
+            grid.add_widget(Factory.Cell(text=str(day.day), bg=bg))
+        box.add_widget(grid)
+
+    def export_backup(self):
+        text = self.g.export_text()
+
+        def copy(v):
+            Clipboard.copy(text)
+            self.popup("[ BACKUP ]", "Copied! Paste it into a notes app or send it to yourself.")
+            return False
+
+        def share(v):
+            try:
+                notifier.share_text(text)
+            except Exception as e:
+                self.popup("[ BACKUP ]", "Could not open the share menu: %s\nUse COPY instead." % e)
+            return False
+        self.dialog("[ BACKUP ]", "Your whole save as text (%d characters).\nKeep it somewhere safe." % len(text),
+                    [("COPY", copy), ("SHARE / SAVE TO...", share), ("CLOSE", lambda v: None)],
+                    hint="", text_in=text, readonly=True, multiline=True, height=dp(120), size=(0.95, 0.75))
+
+    def restore_backup(self):
+        def go(v):
+            if not v.strip():
+                return False
+            self.dialog("[ RESTORE ]", "This replaces ALL current progress with the backup.\nContinue?",
+                        [("YES, RESTORE", lambda _: self.do_restore(v)), ("BACK", lambda _: self.restore_backup())], size=(0.9, 0.45))
+        self.dialog("[ RESTORE ]", "Paste your backup text below.", [("RESTORE", go), ("BACK", lambda v: None)],
+                    hint="SYSTEMSAVE1:...", multiline=True, height=dp(200), size=(0.95, 0.8))
+
+    def do_restore(self, text):
+        try:
+            self.g.import_text(text)
+        except ValueError as e:
+            self.popup("[ RESTORE ]", str(e))
+            return
+        self.refresh()
+        self.popup("[ RESTORE ]", "Backup restored.")
+
+    def toggle_scaling(self):
+        self.g.d["scale_quests"] = not self.g.d.get("scale_quests", True)
+        self.g.save()
+        self.popup("[ ADMIN ]", "Quest scaling with rank is now %s.\n(Applies to quests issued from the next day.)" %
+                   ("ON" if self.g.d["scale_quests"] else "OFF"))
 
     def open_planner(self):
         self.g.clean_plans()
@@ -1033,12 +1294,14 @@ class SoloSystemApp(App):
         for label, date in (("TOMORROW", tomorrow_str()), ("TODAY", today_str())):
             box.add_widget(self.header("%s  (%s)" % (label, time.strftime("%b %d", time.strptime(date, "%Y-%m-%d")))))
             items = self.g.plans_for(date)
-            if not items:
+            carried = self.g.carried_plans() if date == today_str() else []
+            if not items and not carried:
                 box.add_widget(Label(text="Nothing planned.", size_hint_y=None, height=dp(36), color=(0.5, 0.7, 0.8, 1)))
-            for p in items:
-                text = ("[X]  " if p["done"] else "[  ]  ") + (p["time"] + "   " if p["time"] else "") + p["text"]
+            for p in carried + items:
+                text = ("[X]  " if p["done"] else "[  ]  ") + ("(carried)  " if p in carried else "") + (p["time"] + "   " if p["time"] else "") + p["text"]
                 box.add_widget(self.task_row(text, lambda p=p: (self.g.toggle_plan(p["id"]), self.refresh()),
                                              lambda p=p: (self.g.remove_plan(p["id"]), self.refresh()),
+                                             extra=("TO-DO", lambda p=p: self.ask_reminder(p["text"], prefill=p["time"])),
                                              color=(0.05, 0.3, 0.2, 1) if p["done"] else (0.05, 0.18, 0.35, 1)))
 
     def open_journal(self):

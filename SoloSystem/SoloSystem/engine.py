@@ -1,4 +1,4 @@
-import datetime, json, math, os, re, time
+import base64, datetime, json, math, os, re, time, zlib
 
 DAY = 86400
 WARN_HOURS = (3, 1)  # quest warnings: 3 hours and 1 hour before the 24h run out
@@ -96,6 +96,10 @@ TITLES = [
     ("S-Rank Hunter", "Reach Level 70", lambda d: d["level"] >= 70),
     ("Shadow Monarch", "Reach Level 160", lambda d: d["level"] >= 160),
     ("Absolute Being", "Reach Level 200", lambda d: d["level"] >= 200),
+    ("Body Forger", "Reach 25 Physical points", lambda d: d["attrs"]["Physical"] >= 25),
+    ("Sage", "Reach 25 Mental points", lambda d: d["attrs"]["Mental"] >= 25),
+    ("Spirit Walker", "Reach 25 Spiritual points", lambda d: d["attrs"]["Spiritual"] >= 25),
+    ("Balanced Hunter", "Reach 15 points in all three attributes", lambda d: min(d["attrs"].values()) >= 15),
 ]
 
 
@@ -169,6 +173,29 @@ def rank_for(level):
     return r
 
 
+def rank_index(level):
+    idx = 0
+    for i, (lv, _) in enumerate(RANKS):
+        if level >= lv:
+            idx = i
+    return idx
+
+
+# daily quest targets (reps / km) grow with rank: E, D, C, B, A, S, SS, SSS, Transcendent, Absolute Apex
+RANK_SCALE = [1.0, 1.1, 1.25, 1.4, 1.6, 1.8, 2.0, 2.3, 2.6, 3.0]
+
+
+def log_line(e):
+    if isinstance(e, str):  # entries saved by older versions
+        return e
+    return "%s  %s\n%s" % (time.strftime("%m-%d %H:%M", time.localtime(e["ts"])), e["text"], e["res"])
+
+
+def days_text(secs):
+    secs = max(0, int(secs))
+    return "%dd %02dh" % (secs // 86400, secs % 86400 // 3600)
+
+
 def exp_needed(level):
     return 100 + 25 * level
 
@@ -230,6 +257,7 @@ class Game:
             "cycle_start": time.time(), "quests": [], "punishments": [], "log": [],
             "hp": hp_max(1), "gold": 0, "title": "Weakest Hunter", "titles": ["Weakest Hunter"],
             "routines": [], "todos": [], "next_id": 1, "journal": [], "plans": [],
+            "rank_cleared": 0, "scale_quests": True, "history": {}, "rewards": [], "redeemed": [], "quits": [],
             "unseen_arrival": False, "warn": {"cycle": 0, "sent": []},
             "best_streak": 0, "counts": {"habits": 0, "quests": 0, "deaths": 0},
         }
@@ -245,6 +273,8 @@ class Game:
             s = self.d.get("stats", {})
             self.d["attrs"] = {"Physical": max(0, s.get("STR", 1) + s.get("AGI", 1) + s.get("VIT", 1) - 3),
                                "Mental": max(0, s.get("INT", 1) - 1), "Spiritual": max(0, s.get("SENSE", 1) - 1)}
+        if "rank_cleared" not in self.d:  # old saves keep the rank they already had
+            self.d["rank_cleared"] = rank_index(self.d.get("level", 1))
         for key in ("templates", "quests"):
             for q in self.d.get(key, []):
                 if "stat" not in q:
@@ -273,7 +303,9 @@ class Game:
             self.d["exp"] -= exp_needed(self.d["level"])
             self.d["level"] += 1
             self.d["hp"] = hp_max(self.d["level"])
-            msgs.append("LEVEL UP! You are now Level %d [Rank %s]" % (self.d["level"], rank_for(self.d["level"])))
+            msgs.append("LEVEL UP! You are now Level %d [Rank %s]" % (self.d["level"], self.current_rank()))
+        if msgs and self.ensure_trial():
+            msgs.append("PROMOTION TRIAL unlocked: finish it to reach Rank %s" % RANKS[self.d["rank_cleared"] + 1][1])
         return msgs
 
     def lose_exp(self, amount):
@@ -324,9 +356,51 @@ class Game:
         self.save()
         return "Purchased: %s" % name
 
+    def total_exp(self):
+        return sum(exp_needed(l) for l in range(1, self.d["level"])) + self.d["exp"]
+
+    def set_total_exp(self, total):
+        total, lv = max(0, total), 1
+        while total >= exp_needed(lv):
+            total -= exp_needed(lv)
+            lv += 1
+        self.d["level"], self.d["exp"] = lv, total
+
+    def current_rank(self):
+        return RANKS[min(rank_index(self.d["level"]), self.d.get("rank_cleared", 0))][1]
+
+    def pending_trial_rank(self):
+        i = self.d.get("rank_cleared", 0) + 1
+        return RANKS[i][1] if i < len(RANKS) and rank_index(self.d["level"]) >= i else None
+
+    def ensure_trial(self):
+        """Reaching a new rank's level only counts once its Promotion Trial is done."""
+        i = self.d.get("rank_cleared", 0) + 1
+        if i >= len(RANKS) or rank_index(self.d["level"]) < i:
+            return False
+        if any(q.get("trial") for q in self.d["quests"]):
+            return False
+        self.d["quests"].append({
+            "name": "Promotion Trial: Rank %s (any push-ups, sit-ups, squats)" % RANKS[i][1],
+            "reward": 100 + 50 * i, "penalty": 40, "target": 100 + 50 * i, "unit": "reps", "stat": "Physical",
+            "punishment": "Penalty Zone: the trial returns tomorrow, plus 30 extra squats",
+            "trial": True, "rank_idx": i, "done": False, "progress": 0})
+        return True
+
+    def make_quest(self, t):
+        """Today's copy of a quest template. Rep / km targets grow with your rank."""
+        q = dict(t, done=False, progress=0)
+        unit = q.get("unit", "").strip().lower()
+        if self.d.get("scale_quests", True) and unit in ("reps", "km") and q.get("target", 1) > 1:
+            mult = RANK_SCALE[min(rank_index(self.d["level"]), self.d.get("rank_cleared", 0))]
+            q["target"] = round(q["target"] * mult / 5) * 5 if unit == "reps" else round(q["target"] * mult * 2) / 2
+        return q
+
     def set_level(self, level):
         self.d["level"] = max(1, level)
         self.d["exp"] = 0
+        self.d["rank_cleared"] = rank_index(self.d["level"])  # admin override: no trial needed
+        self.d["quests"] = [q for q in self.d["quests"] if not q.get("trial")]
 
     # ---- habits ----
     def detect(self, text):
@@ -340,6 +414,8 @@ class Game:
 
     def apply_habit(self, text, value, stat=""):
         msgs = []
+        before = (self.total_exp(), self.d["hp"], self.d["gold"], self.d["counts"]["deaths"])
+        cat, pts = "", 0
         if value > 0:
             msgs += self.add_exp(value)
             self.d["gold"] += value // 2
@@ -356,9 +432,18 @@ class Game:
             res = "[BAD] %d EXP, -%d HP" % (value, -value // 2)
         else:
             res = "[NEUTRAL] No EXP"
-        self.d["log"].insert(0, "%s  %s  %s" % (time.strftime("%m-%d %H:%M"), text, res))
+        d_exp = self.total_exp() - before[0]
+        entry = {"ts": time.time(), "text": text, "res": res, "d_exp": d_exp, "d_hp": self.d["hp"] - before[1],
+                 "d_gold": self.d["gold"] - before[2], "cat": cat if (value > 0 and cat) else "",
+                 "pts": pts if (value > 0 and cat) else 0, "locked": self.d["counts"]["deaths"] > before[3]}
+        self.d["log"].insert(0, entry)
         del self.d["log"][100:]
         self.d["counts"]["habits"] += 1
+        self.record(exp=max(0, d_exp), habits=1, attr=entry["cat"], pts=entry["pts"])
+        if value < 0:  # a bad habit restarts any matching quit counter
+            for qt in self.d["quits"]:
+                if qt["name"].lower() in text.lower():
+                    self.slip_quit(qt["id"], save=False)
         msgs += self.check_titles()
         self.save()
         return [res] + msgs
@@ -369,7 +454,8 @@ class Game:
     # ---- daily quests ----
     def new_cycle(self, start):
         self.d["cycle_start"] = start
-        self.d["quests"] = [dict(q, done=False, progress=0) for q in self.d["templates"]]
+        self.d["quests"] = [self.make_quest(q) for q in self.d["templates"]]
+        self.ensure_trial()
         self.arrived = True
 
     def complete_quest(self, i):
@@ -386,6 +472,12 @@ class Game:
             msgs.append("%s +2" % cat)
         self.d["counts"]["quests"] += 1
         self.heal(5)
+        self.record(exp=q["reward"], quests=1, attr=cat, pts=2 if cat else 0)
+        if q.get("trial"):
+            self.d["rank_cleared"] = max(self.d["rank_cleared"], q["rank_idx"])
+            msgs.append("PROMOTION! You are now Rank %s" % RANKS[self.d["rank_cleared"]][1])
+            if self.ensure_trial():
+                msgs.append("Next Promotion Trial unlocked: Rank %s" % RANKS[self.d["rank_cleared"] + 1][1])
         msgs += self.check_titles()
         self.save()
         return msgs
@@ -406,7 +498,7 @@ class Game:
              "target": max(target, 1.0), "unit": unit,
              "stat": norm_cat(category) or guess_cat(name)}
         self.d["templates"].append(t)
-        self.d["quests"].append(dict(t, done=False, progress=0))
+        self.d["quests"].append(self.make_quest(t))
         self.save()
 
     def add_run_km(self, km):
@@ -444,6 +536,113 @@ class Game:
 
     def quest_names(self):
         return ", ".join(q["name"] for q in self.d["quests"])
+
+    # ---- history ----
+    def _day(self, date):
+        return self.d["history"].setdefault(date, {"exp": 0, "habits": 0, "quests": 0, "perfect": False,
+                                                   "attrs": {c: 0 for c in CATS}})
+
+    def record(self, exp=0, habits=0, quests=0, attr="", pts=0, date=None):
+        h = self._day(date or today_str())
+        h["exp"] += exp
+        h["habits"] += habits
+        h["quests"] += quests
+        if attr in CATS:
+            h["attrs"][attr] = h["attrs"].get(attr, 0) + pts
+        cutoff = (datetime.date.today() - datetime.timedelta(days=60)).isoformat()
+        for k in [k for k in self.d["history"] if k < cutoff]:
+            del self.d["history"][k]
+
+    # ---- undo / edit the log ----
+    def undo_log(self, idx):
+        e = self.d["log"][idx]
+        if isinstance(e, str):
+            self.d["log"].pop(idx)
+            self.save()
+            return "Entry removed. (It is from an older version, so its EXP could not be reversed.)"
+        if e.get("locked"):
+            return "That entry caused a death, so it cannot be undone."
+        self.set_total_exp(self.total_exp() - e["d_exp"])
+        self.d["gold"] = max(0, self.d["gold"] - e["d_gold"])
+        self.d["hp"] = max(1, min(hp_max(self.d["level"]), self.d["hp"] - e["d_hp"]))
+        if e.get("cat"):
+            self.d["attrs"][e["cat"]] = max(0, self.d["attrs"][e["cat"]] - e["pts"])
+        self.d["counts"]["habits"] = max(0, self.d["counts"]["habits"] - 1)
+        h = self.d["history"].get(datetime.date.fromtimestamp(e["ts"]).isoformat())
+        if h:
+            h["exp"] = max(0, h["exp"] - max(0, e["d_exp"]))
+            h["habits"] = max(0, h["habits"] - 1)
+            if e.get("cat"):
+                h["attrs"][e["cat"]] = max(0, h["attrs"].get(e["cat"], 0) - e["pts"])
+        self.d["log"].pop(idx)
+        self.save()
+        return "Entry undone. EXP, gold, HP and attribute points were reversed."
+
+    def rename_log(self, idx, text):
+        e = self.d["log"][idx]
+        if isinstance(e, dict) and text.strip():
+            e["text"] = text.strip()
+            self.save()
+
+    # ---- quit tracker ----
+    def add_quit(self, name):
+        self.d["quits"].append({"id": self._new_id(), "name": name.strip(), "since": time.time(), "best": 0})
+        self.save()
+
+    def slip_quit(self, qid, save=True):
+        now = time.time()
+        for q in self.d["quits"]:
+            if q["id"] == qid:
+                q["best"] = max(q.get("best", 0), now - q["since"])
+                q["since"] = now
+        if save:
+            self.save()
+
+    def remove_quit(self, qid):
+        self.d["quits"] = [q for q in self.d["quits"] if q["id"] != qid]
+        self.save()
+
+    # ---- real-life rewards ----
+    def add_reward(self, name, cost):
+        self.d["rewards"].append({"id": self._new_id(), "name": name.strip(), "cost": int(cost)})
+        self.save()
+
+    def remove_reward(self, rid):
+        self.d["rewards"] = [r for r in self.d["rewards"] if r["id"] != rid]
+        self.save()
+
+    def redeem_reward(self, rid):
+        for r in self.d["rewards"]:
+            if r["id"] == rid:
+                if self.d["gold"] < r["cost"]:
+                    return "Not enough gold (%d needed, you have %d)." % (r["cost"], self.d["gold"])
+                self.d["gold"] -= r["cost"]
+                self.d["redeemed"].append({"ts": time.time(), "name": r["name"], "cost": r["cost"]})
+                self.save()
+                return "Reward claimed: %s. Enjoy it, you earned it!" % r["name"]
+        return "Reward not found."
+
+    # ---- backup / restore ----
+    def export_text(self):
+        raw = json.dumps(self.d).encode("utf-8")
+        return "SYSTEMSAVE1:" + base64.b64encode(zlib.compress(raw, 9)).decode("ascii")
+
+    def import_text(self, text):
+        text = "".join(text.split())
+        if not text.startswith("SYSTEMSAVE1:"):
+            raise ValueError("That is not a System backup.")
+        try:
+            d = json.loads(zlib.decompress(base64.b64decode(text.split(":", 1)[1])).decode("utf-8"))
+        except Exception:
+            raise ValueError("The backup text is damaged or incomplete.")
+        if not isinstance(d, dict) or "level" not in d or "exp" not in d:
+            raise ValueError("That backup does not contain a valid save.")
+        self.d = d
+        self.save()
+        self.load()  # fills in anything an older backup is missing
+
+    def carried_plans(self):
+        return [p for p in self.d["plans"] if p["date"] < today_str() and not p["done"]]
 
     # ---- planner (not part of the log: no EXP) ----
     def add_plan(self, date, text):
@@ -546,11 +745,18 @@ class Game:
         while now - self.d["cycle_start"] >= DAY and n < 30:
             n += 1
             failed = [q for q in self.d["quests"] if not q["done"]]
-            for q in failed:
-                self.lose_exp(q["penalty"])
-                self.d["punishments"].append(q["punishment"])
-                msgs += self.lose_hp(q["penalty"] // 2)
-                msgs.append("QUEST FAILED: %s  -%d EXP\n%s" % (q["name"], q["penalty"], q["punishment"]))
+            cdate = datetime.date.fromtimestamp(self.d["cycle_start"]).isoformat()
+            for q in failed:  # the penalty shrinks with how far you got
+                tgt = q.get("target", 1)
+                frac = min(1.0, q.get("progress", 0) / float(tgt)) if tgt else 0.0
+                pen = int(round(q["penalty"] * (1 - frac)))
+                self.lose_exp(pen)
+                msgs += self.lose_hp(pen // 2)
+                if frac < 0.5:
+                    self.d["punishments"].append(q["punishment"])
+                    msgs.append("QUEST FAILED: %s  -%d EXP\n%s" % (q["name"], pen, q["punishment"]))
+                else:
+                    msgs.append("QUEST NOT FINISHED: %s  -%d EXP (you got %d%%, no punishment)" % (q["name"], pen, frac * 100))
             if failed:
                 self.d["streak"] = 0
             else:
@@ -558,6 +764,11 @@ class Game:
                 self.d["best_streak"] = max(self.d["best_streak"], self.d["streak"])
                 self.d["gold"] += 20
                 self.heal(20)
+                bonus = min(50, 5 * self.d["streak"])
+                msgs += self.add_exp(bonus)
+                self.record(exp=bonus, date=cdate)
+                self._day(cdate)["perfect"] = True
+                msgs.append("STREAK %d days: +%d EXP" % (self.d["streak"], bonus))
             self.new_cycle(self.d["cycle_start"] + DAY)
         if n:
             msgs += self.check_titles()

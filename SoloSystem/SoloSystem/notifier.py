@@ -59,6 +59,28 @@ def send(title, text):
     nm.notify(int(time.time() * 1000) % 2000000000, b.build())
 
 
+def vibrate(ms=400):
+    from jnius import autoclass, cast
+    ctx = _context()
+    vib = cast("android.os.Vibrator", ctx.getSystemService("vibrator"))
+    if autoclass("android.os.Build$VERSION").SDK_INT >= 26:
+        vib.vibrate(autoclass("android.os.VibrationEffect").createOneShot(ms, -1))
+    else:
+        vib.vibrate(ms)
+
+
+def share_text(text):
+    from jnius import autoclass
+    ctx = _context()
+    intent = autoclass("android.content.Intent")
+    i = intent(intent.ACTION_SEND)
+    i.setType("text/plain")
+    i.putExtra(intent.EXTRA_TEXT, text)
+    chooser = intent.createChooser(i, autoclass("java.lang.String")("Save your backup to..."))
+    chooser.addFlags(intent.FLAG_ACTIVITY_NEW_TASK)
+    ctx.startActivity(chooser)
+
+
 def open_settings():
     from jnius import autoclass
     ctx = _context()
