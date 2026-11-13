@@ -67,6 +67,14 @@ def step(g, folder, state, notify, now, unlocked):
             notify("[SYSTEM] Waiting for you", "\n".join(lines))
     if unlocked is not None:
         state["was_unlocked"] = unlocked
+    text = g.widget_text()  # home screen widget (does nothing when the build has no widget)
+    if text != state.get("widget"):
+        state["widget"] = text
+        try:
+            import notifier
+            notifier.push_widget(text)
+        except Exception:
+            pass
 
 
 def main():
@@ -83,12 +91,27 @@ def main():
                 pass
     g = Game(os.path.join(folder, "system.json"), write=False)
     state = {}
+    runs = None
+    try:  # GPS run tracking lives here so it keeps going with the screen off
+        import runtrack
+        runs = runtrack.RunService(folder, runtrack.AndroidGps())
+    except Exception:
+        pass
+    last_step = 0.0
     while True:
-        try:
-            step(g, folder, state, notify, time.time(), screen_unlocked())
-        except Exception:
-            pass
-        time.sleep(POLL)
+        now = time.time()
+        if runs is not None:
+            try:
+                runs.tick(now)
+            except Exception:
+                pass
+        if now - last_step >= POLL:
+            last_step = now
+            try:
+                step(g, folder, state, notify, now, screen_unlocked())
+            except Exception:
+                pass
+        time.sleep(1)
 
 
 if __name__ == "__main__":

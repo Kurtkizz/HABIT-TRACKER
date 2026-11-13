@@ -563,6 +563,19 @@ class Game:
     def quest_names(self):
         return ", ".join(q["name"] for q in self.d["quests"])
 
+    def add_reps_by_name(self, word, n):
+        """Add counted reps (from the camera) to the first open rep quest whose name has `word`."""
+        for i, q in enumerate(self.d["quests"]):
+            if not q["done"] and not q.get("trial") and word in q["name"].lower() and q.get("target", 1) > 1:
+                return i, self.add_progress(i, n)
+        return None, []
+
+    def widget_text(self):
+        d = self.d
+        return "%s   Lv %d   Rank %s\nEXP %d/%d    HP %d/%d\nQuests %d/%d done    %s left\nStreak %d days    Gold %d" % (
+            d["name"], d["level"], self.current_rank(), d["exp"], exp_needed(d["level"]), d["hp"], hp_max(d["level"]),
+            sum(1 for q in d["quests"] if q["done"]), len(d["quests"]), hours_text(self.remaining()), d["streak"], d["gold"])
+
     def complete_by_keyword(self, kw):
         for i, q in enumerate(self.d["quests"]):
             if not q["done"] and not q.get("trial") and kw in q["name"].lower():

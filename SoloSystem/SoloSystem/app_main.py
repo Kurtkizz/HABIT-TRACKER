@@ -1,14 +1,18 @@
 import os
 import threading
 import time
+import traceback
 from kivy.app import App
 from kivy.lang import Builder
 from kivy.clock import Clock
 from kivy.core.clipboard import Clipboard
-from kivy.factory import Factory
+from kivy.base import ExceptionHandler, ExceptionManager
+from kivy.graphics import Color, Rectangle
+from kivy.uix.widget import Widget
+from kivy.utils import escape_markup
 from kivy.core.window import Window
 from kivy.metrics import dp
-from kivy.properties import StringProperty, NumericProperty
+from kivy.properties import ListProperty, StringProperty, NumericProperty
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.gridlayout import GridLayout
@@ -25,8 +29,65 @@ try:
     import notifier
 except ImportError:
     notifier = None
+try:
+    import reps
+except ImportError:
+    reps = None
+try:
+    import runtrack
+except ImportError:
+    runtrack = None
 
 Window.softinput_mode = "below_target"
+
+
+class Bar(Widget):
+    """A thin progress bar (value 0..1)."""
+    value = NumericProperty(0)
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        with self.canvas:
+            Color(0.55, 0.3, 1, 1)
+            self._rect = Rectangle(pos=self.pos, size=(1, 1))
+        self.bind(pos=self._draw, size=self._draw, value=self._draw)
+        self._draw()
+
+    def _draw(self, *a):
+        self._rect.pos = (self.x, self.y + dp(4))
+        self._rect.size = (max(self.width * self.value, 1), max(self.height - dp(8), 1))
+
+
+class Cell(Label):
+    """A calendar day with a coloured background."""
+    bg = ListProperty([0.1, 0.1, 0.18, 1])
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.color = (0.8, 0.95, 1, 1)
+        with self.canvas.before:
+            self._color = Color(*self.bg)
+            self._rect = Rectangle(pos=self.pos, size=self.size)
+        self.bind(pos=self._draw, size=self._draw, bg=self._draw)
+        self._draw()
+
+    def _draw(self, *a):
+        self._color.rgba = self.bg
+        self._rect.pos = (self.x + dp(1), self.y + dp(1))
+        self._rect.size = (max(self.width - dp(2), 0), max(self.height - dp(2), 0))
+
+
+class ErrorHandler(ExceptionHandler):
+    """A bug in one button should show a message, not close the whole app."""
+
+    def handle_exception(self, inst):
+        if isinstance(inst, (SystemExit, KeyboardInterrupt)):
+            return ExceptionManager.RAISE
+        try:
+            App.get_running_app().report_error(inst)
+            return ExceptionManager.PASS
+        except Exception:
+            return ExceptionManager.RAISE
 
 KV = """
 <Panel@BoxLayout>:
@@ -168,6 +229,11 @@ KV = """
             size_hint_y: None
             height: dp(48)
             on_release: app.open_run()
+        SB:
+            text: 'CAMERA REP COUNTER'
+            size_hint_y: None
+            height: dp(48)
+            on_release: app.open_camera()
         ScrollView:
             GridLayout:
                 id: quest_box
@@ -249,25 +315,6 @@ KV = """
             size_hint_y: None
             height: dp(48)
             on_release: app.go('tasks')
-
-<Bar@Widget>:
-    value: 0
-    canvas:
-        Color:
-            rgba: 0.55, 0.3, 1, 1
-        Rectangle:
-            pos: self.x, self.y + dp(4)
-            size: max(self.width * self.value, 1), self.height - dp(8)
-
-<Cell@Label>:
-    bg: 0.1, 0.1, 0.18, 1
-    color: 0.8, 0.95, 1, 1
-    canvas.before:
-        Color:
-            rgba: self.bg
-        Rectangle:
-            pos: self.x + dp(1), self.y + dp(1)
-            size: self.width - dp(2), self.height - dp(2)
 
 <HistoryScreen>:
     BoxLayout:
@@ -518,6 +565,11 @@ KV = """
                 height: dp(48)
                 on_release: app.toggle_scaling()
             SB:
+                text: 'VIEW LAST ERROR'
+                size_hint_y: None
+                height: dp(48)
+                on_release: app.view_error()
+            SB:
                 text: 'TEST NOTIFICATION'
                 size_hint_y: None
                 height: dp(48)
@@ -662,11 +714,13 @@ class SoloSystemApp(App):
 
     def build(self):
         self.title = "The System"
+        ExceptionManager.add_handler(ErrorHandler())
         self.beat()
         self.g = Game(os.path.join(self.user_data_dir, "system.json"))
         self.root_widget = Builder.load_string(KV)
         Clock.schedule_once(lambda dt: self.check_cycle(), 0.5)
         Clock.schedule_once(lambda dt: loader.confirm(), 2)
+        Clock.schedule_once(lambda dt: self.check_active_run(), 3)
         Clock.schedule_once(lambda dt: self.check_updates(auto=True), 4)
         Clock.schedule_interval(lambda dt: self.update_timer(), 1)
         Clock.schedule_interval(lambda dt: self.check_cycle(), 30)
@@ -713,6 +767,37 @@ class SoloSystemApp(App):
         except Exception as e:
             self.popup("[ NOTIFICATIONS ]", "Could not send: %s" % e)
 
+    _last_error_popup = 0.0
+
+    def report_error(self, inst):
+        text = "".join(traceback.format_exception(type(inst), inst, inst.__traceback__))
+        try:
+            with open(os.path.join(self.user_data_dir, "last_error.txt"), "w") as f:
+                f.write(time.strftime("%Y-%m-%d %H:%M:%S") + "\n" + text)
+        except Exception:
+            pass
+        now = time.time()
+        if now - self._last_error_popup > 5:  # do not bury the screen in popups
+            self._last_error_popup = now
+            summary = escape_markup(text.strip().splitlines()[-1][:200])
+            Clock.schedule_once(lambda dt: self.popup(
+                "[ ERROR ]", "Something went wrong, but the app kept running:\n[b]%s[/b]\n\nADMIN > VIEW LAST ERROR shows the details." % summary,
+                (1, 0.3, 0.3, 1)), 0)
+
+    def view_error(self):
+        try:
+            with open(os.path.join(self.user_data_dir, "last_error.txt")) as f:
+                text = f.read()
+        except Exception:
+            text = "No error has been recorded."
+
+        def copy(v):
+            Clipboard.copy(text)
+            self.popup("[ ERROR ]", "Copied! Paste it to me.")
+            return False
+        self.dialog("[ LAST ERROR ]", "Copy this and send it over.", [("COPY", copy), ("CLOSE", lambda v: None)],
+                    hint="", text_in=text, readonly=True, multiline=True, height=dp(260), size=(0.95, 0.85))
+
     def beat(self):
         try:
             with open(os.path.join(self.user_data_dir, "alive.txt"), "w") as f:
@@ -751,6 +836,17 @@ class SoloSystemApp(App):
         self.popup("[ UPDATE ]", "Live updates removed.\nClose the app and open it again to use the built-in code.")
 
     # ---------- helpers ----------
+    _widget_last = None
+
+    def push_widget(self):
+        try:
+            text = self.g.widget_text()
+            if text != self._widget_last:
+                self._widget_last = text
+                notifier.push_widget(text)  # only works in builds made with the widget option
+        except Exception:
+            pass
+
     def vibrate(self, ms=400):
         try:
             notifier.vibrate(ms)
@@ -789,7 +885,7 @@ class SoloSystemApp(App):
         self.stats_text = "\n\n".join(
             "[color=%s]%s Attributes[/color]\n[size=28sp][b]%d[/b][/size]   (%d%%)" % (cols[k], k, a[k], round(a[k] * 100.0 / tot))
             for k in CATS)
-        self.extra_text = "Streak: %d days   |   Pending punishments: %d\nBuild 1.8 (%s)" % (d["streak"], len(d["punishments"]), updater.code_label())
+        self.extra_text = "Streak: %d days   |   Pending punishments: %d\nBuild 1.9 (%s)" % (d["streak"], len(d["punishments"]), updater.code_label())
         self.log_text = ""
         self.build_quests()
         self.build_shop()
@@ -798,6 +894,7 @@ class SoloSystemApp(App):
         self.build_journal()
         self.build_planner()
         self.build_log()
+        self.push_widget()
 
     def mkbtn(self, text, cb, dis=False, color=(0.05, 0.18, 0.35, 1)):
         b = Button(text=text, size_hint_y=None, height=dp(64), background_normal="", disabled=dis,
@@ -1215,7 +1312,7 @@ class SoloSystemApp(App):
                                                                   [("YES, DELETE", lambda v: (self.g.remove_mastery(m["id"]), self.refresh())),
                                                                    ("BACK", lambda v: None)], size=(0.9, 0.4)),
                                           color=(0.05, 0.3, 0.2, 1) if m["met"] else (0.15, 0.15, 0.4, 1)))
-            cell.add_widget(Factory.Bar(value=m["percent"] / 100.0, size_hint_y=None, height=dp(18)))
+            cell.add_widget(Bar(value=m["percent"] / 100.0, size_hint_y=None, height=dp(18)))
             box.add_widget(cell)
 
     def add_routine_dialog(self):
@@ -1347,7 +1444,7 @@ class SoloSystemApp(App):
         for x, v in zip(days, vals):
             row = BoxLayout(size_hint_y=None, height=dp(24), spacing=dp(6))
             row.add_widget(Label(text=x.strftime("%b %d"), size_hint_x=None, width=dp(64), color=light))
-            row.add_widget(Factory.Bar(value=v / top))
+            row.add_widget(Bar(value=v / top))
             row.add_widget(Label(text=str(v), size_hint_x=None, width=dp(48), color=light))
             box.add_widget(row)
         week = {k: 0 for k in CATS}
@@ -1373,7 +1470,7 @@ class SoloSystemApp(App):
                 bg = (0.1, 0.55, 0.3, 1)
             elif h and (h.get("habits") or h.get("quests")):
                 bg = (0.15, 0.3, 0.65, 1)
-            grid.add_widget(Factory.Cell(text=str(day.day), bg=bg))
+            grid.add_widget(Cell(text=str(day.day), bg=bg))
         box.add_widget(grid)
 
     def export_backup(self):
@@ -1519,15 +1616,28 @@ class SoloSystemApp(App):
         self._after_log = lambda: self.g.remove_todo(t["id"])
         self.process_habit(t["text"], back=lambda: self.tap_todo(t))
 
-    # ---------- GPS run tracker ----------
-    def open_run(self):
+    # ---------- GPS run tracker (keeps going with the screen off) ----------
+    def run_files(self):
+        return os.path.join(self.user_data_dir, "run_cmd.json"), os.path.join(self.user_data_dir, "run_state.json")
+
+    def check_active_run(self):
+        """A run may still be tracked by the background service from before the app was closed."""
+        try:
+            st = runtrack.read_json(self.run_files()[1]) or {}
+            if st.get("active") and time.time() - st.get("ts", 0) < 15:
+                self.open_run(resume=st)
+        except Exception:
+            pass
+
+    def open_run(self, resume=None):
         from engine import RunTracker
         self.tracker = RunTracker()
         self.running = False
+        self.run_mode, self.run_id, self.run_meters = None, None, 0.0
         self.gps_fixes, self.gps_acc, self.gps_status = 0, None, ""
         box = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
-        self.run_label = Label(text="0.00 km\n00:00\nGo outside with open sky,\nthen press START", font_size="18sp", halign="center",
-                               color=(0.7, 1, 1, 1))
+        self.run_label = Label(text="0.00 km\n00:00\nGo outside with open sky,\nthen press START", font_size="18sp",
+                               halign="center", color=(0.7, 1, 1, 1))
         box.add_widget(self.run_label)
         row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(6))
         self.run_pop = Popup(title="[ RUN TRACKER ]", content=box, size_hint=(0.92, 0.6), auto_dismiss=False,
@@ -1539,6 +1649,10 @@ class SoloSystemApp(App):
             row.add_widget(b)
         box.add_widget(row)
         self.run_pop.open()
+        if resume:  # attach to the run the service is still tracking
+            self.run_mode, self.run_id, self.running = "service", resume["id"], True
+            self.run_t0 = resume.get("started") or time.time()
+            Clock.schedule_interval(self.run_tick, 1)
 
     def start_run(self, *a):
         if self.running:
@@ -1547,12 +1661,47 @@ class SoloSystemApp(App):
             from android.permissions import request_permissions
             request_permissions(["android.permission.ACCESS_FINE_LOCATION", "android.permission.ACCESS_COARSE_LOCATION"],
                                 lambda perms, grants: Clock.schedule_once(
-                                    lambda dt: self._start_gps() if all(grants) else self.popup(
+                                    lambda dt: self._begin_run() if all(grants) else self.popup(
                                         "[ GPS ]", "Location permission is needed to track your run."), 0))
         except ImportError:  # not on Android
-            self._start_gps()
+            self._begin_run()
 
-    def _start_gps(self):
+    def _open_settings(self):
+        try:
+            notifier.open_app_settings()
+        except Exception as e:
+            self.popup("[ RUN TRACKER ]", "Could not open Settings: %s" % e)
+
+    def _begin_run(self):
+        background = None
+        try:
+            background = notifier.has_permission("android.permission.ACCESS_BACKGROUND_LOCATION")
+        except Exception:
+            pass
+        if runtrack is None:
+            self._start_app_gps()
+        elif background is False:
+            self.dialog("[ RUN TRACKER ]",
+                        "To keep tracking with the screen OFF, open Settings > Permissions > Location and choose\n"
+                        "\"Allow all the time\", then press START again.\n\nOr track with the screen kept on.",
+                        [("OPEN SETTINGS", lambda v: self._open_settings()),
+                         ("TRACK WITH SCREEN ON", lambda v: self._start_app_gps()), ("BACK", lambda v: None)], size=(0.92, 0.7))
+        else:
+            self._start_service_run()
+
+    def _start_service_run(self):
+        self.run_mode = "service"
+        self.run_id = int(time.time() * 1000)
+        runtrack.write_json(self.run_files()[0], {"id": self.run_id, "active": True})
+        try:
+            from android import AndroidService
+            AndroidService("The System", "Watching your quests").start(self.user_data_dir)
+        except Exception:
+            pass
+        self.running, self.run_t0 = True, time.time()
+        Clock.schedule_interval(self.run_tick, 1)
+
+    def _start_app_gps(self):
         try:
             from plyer import gps
             gps.configure(on_location=self.on_gps, on_status=self.on_gps_status)
@@ -1560,8 +1709,7 @@ class SoloSystemApp(App):
         except Exception as e:
             self.popup("[ GPS ]", "GPS is not available here.\n%s" % e)
             return
-        self.running = True
-        self.run_t0 = time.time()
+        self.run_mode, self.running, self.run_t0 = "app", True, time.time()
         self.keep_awake(True)
         Clock.schedule_interval(self.run_tick, 1)
 
@@ -1579,19 +1727,33 @@ class SoloSystemApp(App):
     def run_tick(self, dt):
         if not self.running:
             return False
-        s = int(time.time() - self.run_t0)
-        acc = "-" if self.gps_acc is None else "%d m" % self.gps_acc
-        if self.tracker.last:
-            note = "Tracking"
-        elif self.gps_fixes:
-            note = "Signal too weak - move to open sky"
+        now = time.time()
+        if self.run_mode == "service":
+            st = runtrack.read_json(self.run_files()[1]) or {}
+            mine = st.get("id") == self.run_id
+            if not mine or now - st.get("ts", 0) > 10:
+                if now - self.run_t0 > 10:  # the service does not answer: track inside the app instead
+                    runtrack.write_json(self.run_files()[0], {"id": self.run_id, "active": False})
+                    self.running = False
+                    self.popup("[ RUN TRACKER ]", "Background tracking is not available right now.\nTracking inside the app instead:\nkeep the screen on.")
+                    self._start_app_gps()
+                    return False
+                self.run_label.text = "0.00 km\nStarting the background tracker..."
+                return
+            self.run_meters = st.get("meters", 0.0)
+            fixes, acc, note = st.get("fixes", 0), st.get("accuracy"), st.get("status", "")
+            where = "background"
         else:
-            note = "Waiting for GPS (can take 1 minute)"
-        self.run_label.text = "%.2f km\n%02d:%02d\n%s\nFixes: %d   Accuracy: %s\n%s" % (
-            self.tracker.meters / 1000.0, s // 60, s % 60, note, self.gps_fixes, acc, self.gps_status)
+            self.run_meters = self.tracker.meters
+            fixes, acc = self.gps_fixes, self.gps_acc
+            note = ("Tracking" if self.tracker.last else "Signal too weak - move to open sky") if fixes else "Waiting for GPS (can take 1 minute)"
+            where = "keep the screen on"
+        s = int(now - self.run_t0)
+        self.run_label.text = "%.2f km\n%02d:%02d\n%s\nFixes: %d   Accuracy: %s\n(%s)" % (
+            self.run_meters / 1000.0, s // 60, s % 60, note, fixes, "-" if acc is None else "%d m" % acc, where)
 
     def stop_gps(self):
-        if self.running:
+        if self.running and self.run_mode == "app":
             try:
                 from plyer import gps
                 gps.stop()
@@ -1602,8 +1764,27 @@ class SoloSystemApp(App):
         self.keep_awake(False)
 
     def finish_run(self, *a):
+        if self.running and self.run_mode == "service":
+            runtrack.write_json(self.run_files()[0], {"id": self.run_id, "active": False})
+            self._tries = 0
+            Clock.schedule_interval(self._await_final, 0.8)  # wait for the service's last reading
+            return
         km = self.tracker.meters / 1000.0
         self.stop_gps()
+        self._save_run(km)
+
+    def _await_final(self, dt):
+        st = runtrack.read_json(self.run_files()[1]) or {}
+        mine = st.get("id") == self.run_id
+        self._tries += 1
+        if (mine and not st.get("active", True)) or self._tries >= 6:
+            meters = st.get("meters", self.run_meters) if mine else self.run_meters
+            self.running = False
+            Clock.unschedule(self.run_tick)
+            self._save_run(meters / 1000.0)
+            return False
+
+    def _save_run(self, km):
         self.run_pop.dismiss()
         if km < 0.01:
             self.popup("[ RUN ]", "No distance was recorded.")
@@ -1616,6 +1797,8 @@ class SoloSystemApp(App):
             self.popup("[ RUN ]", "Added %.2f km to %s\n%s" % (km, self.g.d["quests"][i]["name"], "\n".join(msgs)))
 
     def cancel_run(self, *a):
+        if self.running and self.run_mode == "service":
+            runtrack.write_json(self.run_files()[0], {"id": self.run_id, "active": False})
         self.stop_gps()
         self.run_pop.dismiss()
 
@@ -1633,6 +1816,96 @@ class SoloSystemApp(App):
             go()
         except Exception:
             pass
+
+    # ---------- camera rep counter ----------
+    def open_camera(self):
+        self.dialog("[ CAMERA REP COUNTER ]",
+                    "Prop your phone up so your whole body is in view\n(side-on works best), then pick an exercise.",
+                    [("PUSH-UPS", lambda v: self.start_camera("pushup")), ("SIT-UPS", lambda v: self.start_camera("situp")),
+                     ("SQUATS", lambda v: self.start_camera("squat")), ("BACK", lambda v: None)], size=(0.92, 0.7))
+
+    def start_camera(self, kind):
+        try:
+            import camera_pose
+            if reps is None or not camera_pose.available():
+                raise RuntimeError("this build has no camera library")
+        except Exception as e:
+            self.popup("[ CAMERA ]", "The camera counter needs the camera build of the app.\n(%s)" % e)
+            return
+        try:
+            from android.permissions import request_permissions
+            request_permissions(["android.permission.CAMERA"], lambda perms, grants: Clock.schedule_once(
+                lambda dt: self._go_camera(kind) if all(grants) else self.popup("[ CAMERA ]", "Camera permission is needed to count reps."), 0))
+        except ImportError:
+            self._go_camera(kind)
+
+    def _go_camera(self, kind, front=True):
+        import camera_pose
+        self.reps_kind, self.reps = kind, reps.RepCounter(kind)
+        self.cam = camera_pose.PoseCamera(self.on_landmarks, front=front)
+        try:
+            self.cam.start()
+        except Exception as e:
+            self.cam.stop()
+            self.popup("[ CAMERA ]", "Could not start the camera:\n%s" % e)
+            return
+        self.keep_awake(True)
+        box = BoxLayout(orientation="vertical", spacing=dp(6), padding=dp(8))
+        self.cam_label = Label(text="Starting...", font_size="20sp", halign="center", color=(0.7, 1, 1, 1))
+        box.add_widget(self.cam_label)
+        self.cam_pop = Popup(title="[ %s ]" % reps.NAMES[kind].upper(), content=box, size_hint=(0.94, 0.7), auto_dismiss=False,
+                             title_color=(0.25, 0.85, 1, 1), separator_color=(0.25, 0.85, 1, 1), background_color=(0.02, 0.05, 0.12, 1))
+        for names in ((("-1", lambda w: self.reps.adjust(-1)), ("+1", lambda w: self.reps.adjust(1)),
+                       ("FLIP CAMERA", lambda w: self.flip_camera())),
+                      (("FINISH", lambda w: self.finish_camera()), ("CANCEL", lambda w: self.stop_camera(True)))):
+            row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(6))
+            for text, cb in names:
+                b = Button(text=text, background_normal="", background_color=(0.05, 0.18, 0.35, 1), color=(0.6, 0.95, 1, 1))
+                b.bind(on_release=cb)
+                row.add_widget(b)
+            box.add_widget(row)
+        self.cam_pop.open()
+        Clock.schedule_interval(self.cam_tick, 0.3)
+
+    def on_landmarks(self, lm):  # called from the camera thread
+        self.reps.update(lm, time.time())
+
+    def cam_tick(self, dt):
+        if getattr(self, "cam", None) is None:
+            return False
+        r, c = self.reps, self.cam
+        ang = "-" if r.angle is None else "%d deg" % r.angle
+        self.cam_label.text = "%s: %d\n%s\nAngle: %s   Frames: %d   Seen: %d%s" % (
+            reps.NAMES[self.reps_kind], r.count, r.status, ang, c.frames, c.poses, ("\n" + c.error[:60]) if c.error else "")
+
+    def flip_camera(self):
+        kind, front = self.reps_kind, not self.cam.front
+        count = self.reps.count
+        self.stop_camera(False)
+        self._go_camera(kind, front)
+        self.reps.count = count
+
+    def stop_camera(self, close):
+        Clock.unschedule(self.cam_tick)
+        if getattr(self, "cam", None) is not None:
+            self.cam.stop()
+            self.cam = None
+        self.keep_awake(False)
+        if close:
+            self.cam_pop.dismiss()
+
+    def finish_camera(self):
+        n, kind = self.reps.count, self.reps_kind
+        self.stop_camera(True)
+        if n == 0:
+            self.popup("[ CAMERA ]", "No reps were counted.")
+            return
+        i, msgs = self.g.add_reps_by_name(reps.QUEST_WORD[kind], n)
+        self.refresh()
+        if i is None:
+            self.popup("[ CAMERA ]", "Counted %d %s, but there is no open quest for them." % (n, reps.NAMES[kind].lower()))
+        else:
+            self.popup("[ CAMERA ]", "Added %d %s to %s\n%s" % (n, reps.NAMES[kind].lower(), self.g.d["quests"][i]["name"], "\n".join(msgs)))
 
     # ---------- admin ----------
     def open_admin(self):

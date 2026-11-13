@@ -81,6 +81,31 @@ def share_text(text):
     ctx.startActivity(chooser)
 
 
+def has_permission(name):
+    """True / False (None when it cannot be read)."""
+    try:
+        return _context().checkSelfPermission(name) == 0
+    except Exception:
+        return None
+
+
+def open_app_settings():
+    from jnius import autoclass
+    ctx = _context()
+    intent = autoclass("android.content.Intent")
+    uri = autoclass("android.net.Uri").parse("package:" + ctx.getPackageName())
+    i = intent(autoclass("android.provider.Settings").ACTION_APPLICATION_DETAILS_SETTINGS, uri)
+    i.addFlags(intent.FLAG_ACTIVITY_NEW_TASK)
+    ctx.startActivity(i)
+
+
+def push_widget(text):
+    """Updates the home screen widget (only exists in builds made with the widget option)."""
+    from jnius import autoclass
+    ctx = _context()
+    autoclass("org.hunter.solosystem.StatusWidget").push(ctx, autoclass("java.lang.String")(text))
+
+
 def open_settings():
     from jnius import autoclass
     ctx = _context()

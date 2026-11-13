@@ -6,7 +6,7 @@ import shutil
 import sys
 import time
 
-UPDATE_FILES = ["app_main.py", "engine.py", "service_main.py", "notifier.py"]
+UPDATE_FILES = ["app_main.py", "engine.py", "service_main.py", "notifier.py", "reps.py", "camera_pose.py", "runtrack.py"]
 REPO_RAW = os.environ.get(
     "SOLO_REPO_RAW", "https://raw.githubusercontent.com/Kurtkizz/HABIT-TRACKER/main/SoloSystem/SoloSystem/")
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -50,7 +50,7 @@ def discard(reason=""):
 
 
 def _purge():
-    for m in ("app_main", "engine", "service_main", "notifier"):
+    for m in ("app_main", "engine", "service_main", "notifier", "reps", "camera_pose", "runtrack"):
         sys.modules.pop(m, None)
 
 
@@ -103,8 +103,10 @@ def boot():
         if not live:
             raise
         import traceback
-        log("live code crashed, reverting:\n" + traceback.format_exc())
-        discard()
+        log("live code crashed:\n" + traceback.format_exc())
+        if not os.path.exists(flag):  # it had started fine: a bug while using it, keep the live code
+            raise
+        discard()  # it never got going: go back to the code built into the app
         _purge()
         import app_main
         app_main.run()
