@@ -99,6 +99,7 @@ TITLES = [
     ("Body Forger", "Reach 25 Physical points", lambda d: d["attrs"]["Physical"] >= 25),
     ("Sage", "Reach 25 Mental points", lambda d: d["attrs"]["Mental"] >= 25),
     ("Spirit Walker", "Reach 25 Spiritual points", lambda d: d["attrs"]["Spiritual"] >= 25),
+    ("Master", "Reach 100% in a mastery", lambda d: any(m["percent"] >= 100 for m in d.get("mastery", []))),
     ("Balanced Hunter", "Reach 15 points in all three attributes", lambda d: min(d["attrs"].values()) >= 15),
 ]
 
@@ -124,6 +125,12 @@ DEFAULT_QUESTS = [
     {"name": "Sit-ups", "reward": 40, "penalty": 30, "punishment": "Penalty Zone: 50 extra sit-ups", "target": 100, "unit": "reps", "stat": "Physical"},
     {"name": "Squats", "reward": 40, "penalty": 30, "punishment": "Penalty Zone: 50 extra squats", "target": 100, "unit": "reps", "stat": "Physical"},
     {"name": "Run", "reward": 60, "penalty": 40, "punishment": "Penalty Zone: run 3 km extra", "target": 10, "unit": "km", "stat": "Physical"},
+    {"name": "Read", "reward": 30, "penalty": 20, "punishment": "Penalty Zone: read 5 extra pages tomorrow", "target": 10, "unit": "pages", "stat": "Mental"},
+    {"name": "Study", "reward": 35, "penalty": 25, "punishment": "Penalty Zone: 15 extra minutes of study tomorrow", "target": 30, "unit": "minutes", "stat": "Mental"},
+    {"name": "Write a page", "reward": 25, "penalty": 15, "punishment": "Penalty Zone: write two pages tomorrow", "target": 1, "unit": "", "stat": "Mental"},
+    {"name": "Meditate", "reward": 30, "penalty": 20, "punishment": "Penalty Zone: 10 extra minutes of silence tomorrow", "target": 10, "unit": "minutes", "stat": "Spiritual"},
+    {"name": "Gratitude: list 3 things", "reward": 20, "penalty": 10, "punishment": "Penalty Zone: list 6 things tomorrow", "target": 3, "unit": "things", "stat": "Spiritual"},
+    {"name": "Journal", "reward": 25, "penalty": 15, "punishment": "Penalty Zone: write two journal entries tomorrow", "target": 1, "unit": "", "stat": "Spiritual"},
 ]
 
 
@@ -196,6 +203,17 @@ def days_text(secs):
     return "%dd %02dh" % (secs // 86400, secs % 86400 // 3600)
 
 
+MASTERY_RANKS = [(0, "Novice"), (10, "Apprentice"), (25, "Adept"), (50, "Expert"), (75, "Master"), (100, "Grandmaster")]
+
+
+def mastery_rank(percent):
+    r = MASTERY_RANKS[0][1]
+    for lo, name in MASTERY_RANKS:
+        if percent >= lo:
+            r = name
+    return r
+
+
 def exp_needed(level):
     return 100 + 25 * level
 
@@ -257,7 +275,7 @@ class Game:
             "cycle_start": time.time(), "quests": [], "punishments": [], "log": [],
             "hp": hp_max(1), "gold": 0, "title": "Weakest Hunter", "titles": ["Weakest Hunter"],
             "routines": [], "todos": [], "next_id": 1, "journal": [], "plans": [],
-            "rank_cleared": 0, "scale_quests": True, "history": {}, "rewards": [], "redeemed": [], "quits": [],
+            "rank_cleared": 0, "quests_v2": True, "mastery": [], "scale_quests": True, "history": {}, "rewards": [], "redeemed": [], "quits": [],
             "unseen_arrival": False, "warn": {"cycle": 0, "sent": []},
             "best_streak": 0, "counts": {"habits": 0, "quests": 0, "deaths": 0},
         }
@@ -279,6 +297,14 @@ class Game:
             for q in self.d.get(key, []):
                 if "stat" not in q:
                     q["stat"] = guess_cat(q.get("name", ""))
+        if not self.d.get("quests_v2"):  # one-time: add the default Mental and Spiritual quests
+            have = {t["name"].lower() for t in self.d.get("templates", [])}
+            for q in DEFAULT_QUESTS:
+                if q.get("stat") in ("Mental", "Spiritual") and q["name"].lower() not in have:
+                    self.d.setdefault("templates", []).append(dict(q))
+                    if self.d.get("quests"):
+                        self.d["quests"].append(self.make_quest(q))
+            self.d["quests_v2"] = True
         for k, v in base.items():
             self.d.setdefault(k, v)
         if not self.d["quests"]:
@@ -537,6 +563,66 @@ class Game:
     def quest_names(self):
         return ", ".join(q["name"] for q in self.d["quests"])
 
+    def complete_by_keyword(self, kw):
+        for i, q in enumerate(self.d["quests"]):
+            if not q["done"] and not q.get("trial") and kw in q["name"].lower():
+                return self.complete_quest(i)
+        return []
+
+    # ---- mastery ----
+    def add_mastery(self, name, minutes=60, goal_days=365, cat="Mental"):
+        self.d["mastery"].append({"id": self._new_id(), "name": name.strip(), "minutes": max(1, int(minutes)),
+                                  "goal_days": max(1, int(goal_days)), "cat": norm_cat(cat) or "Mental",
+                                  "percent": 0.0, "total_min": 0, "days": 0, "streak": 0, "best": 0,
+                                  "day": "", "today": 0, "met": False})
+        self.save()
+
+    def remove_mastery(self, mid):
+        self.d["mastery"] = [m for m in self.d["mastery"] if m["id"] != mid]
+        self.save()
+
+    def roll_mastery(self):
+        """New day: today's minutes reset; the streak only survives if yesterday was completed."""
+        today = today_str()
+        yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+        for m in self.d["mastery"]:
+            if m["day"] != today:
+                if not (m["day"] == yesterday and m["met"]):
+                    m["streak"] = 0
+                m["day"], m["today"], m["met"] = today, 0, False
+
+    def practice(self, mid, minutes):
+        """Add practice minutes. Each day the percent grows by 100/goal_days when the daily minutes are
+        reached (a little more for extra minutes, up to 1.5x). Finishing the daily minutes pays EXP."""
+        self.roll_mastery()
+        m = next((x for x in self.d["mastery"] if x["id"] == mid), None)
+        if m is None or minutes <= 0:
+            return []
+        base = 100.0 / m["goal_days"]
+
+        def credit(mins):
+            return min(base * 1.5, mins * base / m["minutes"])
+        old_percent, before = m["percent"], credit(m["today"])
+        m["today"] += minutes
+        m["total_min"] += minutes
+        m["percent"] = min(100.0, m["percent"] + credit(m["today"]) - before)
+        msgs = []
+        if not m["met"] and m["today"] >= m["minutes"]:
+            m["met"] = True
+            m["days"] += 1
+            m["streak"] += 1
+            m["best"] = max(m["best"], m["streak"])
+            msgs += self.add_exp(30)
+            self.d["gold"] += 15
+            self.d["attrs"][m["cat"]] += 2
+            self.record(exp=30, attr=m["cat"], pts=2)
+            msgs.insert(0, "MASTERY: %s - today's practice complete!  +30 EXP, %s +2" % (m["name"], m["cat"]))
+        if old_percent < 100 <= m["percent"]:
+            msgs.append("MASTERY ACHIEVED: %s. You are a Grandmaster!" % m["name"])
+        msgs += self.check_titles()
+        self.save()
+        return msgs
+
     # ---- history ----
     def _day(self, date):
         return self.d["history"].setdefault(date, {"exp": 0, "habits": 0, "quests": 0, "perfect": False,
@@ -713,8 +799,12 @@ class Game:
                 r["last_done"] = time.strftime("%Y-%m-%d")
         self.save()
 
-    def add_todo(self, text, due=None):
-        self.d["todos"].append({"id": self._new_id(), "text": text.strip(), "due": due, "notified": False})
+    def todos_sorted(self):
+        order = {"hard": 0, "mid": 1, "easy": 2}
+        return sorted(self.d["todos"], key=lambda t: (order.get(t.get("level", "mid"), 1), t.get("due") is None, t.get("due") or 0, t["id"]))
+
+    def add_todo(self, text, due=None, level="mid"):
+        self.d["todos"].append({"id": self._new_id(), "text": text.strip(), "due": due, "notified": False, "level": level})
         self.save()
 
     def remove_todo(self, tid):

@@ -17,7 +17,7 @@ from kivy.uix.popup import Popup
 from kivy.uix.screenmanager import Screen
 from kivy.uix.textinput import TextInput
 
-from engine import Game, due_from, hours_text, today_str, tomorrow_str, CATS, norm_cat, SHOP, TITLES, hp_max, rank_for, exp_needed, log_line, days_text, habits_to_text, text_to_habits, quests_to_text, text_to_quests
+from engine import Game, mastery_rank, due_from, hours_text, today_str, tomorrow_str, CATS, norm_cat, SHOP, TITLES, hp_max, rank_for, exp_needed, log_line, days_text, habits_to_text, text_to_habits, quests_to_text, text_to_quests
 
 import loader
 import updater
@@ -182,7 +182,7 @@ KV = """
         padding: dp(12)
         spacing: dp(8)
         L:
-            text: '[b][ ROUTINE & TO-DO ][/b]'
+            text: '[b][ TASKS ][/b]'
             font_size: '22sp'
             size_hint_y: None
             height: dp(40)
@@ -291,6 +291,34 @@ KV = """
             size_hint_y: None
             height: dp(48)
             on_release: app.go('status')
+
+<PageScreen>:
+    BoxLayout:
+        orientation: 'vertical'
+        padding: dp(12)
+        spacing: dp(8)
+        L:
+            text: '[b]' + app.page_title + '[/b]'
+            font_size: '22sp'
+            size_hint_y: None
+            height: dp(40)
+        SB:
+            text: app.page_add_text
+            size_hint_y: None
+            height: dp(52)
+            on_release: app.page_add()
+        ScrollView:
+            GridLayout:
+                id: page_box
+                cols: 1
+                spacing: dp(8)
+                size_hint_y: None
+                height: self.minimum_height
+        SB:
+            text: 'BACK'
+            size_hint_y: None
+            height: dp(48)
+            on_release: app.go('tasks')
 
 <ShopScreen>:
     BoxLayout:
@@ -526,6 +554,8 @@ BoxLayout:
             name: 'log'
         TasksScreen:
             name: 'tasks'
+        PageScreen:
+            name: 'page'
         JournalScreen:
             name: 'journal'
         PlannerScreen:
@@ -589,6 +619,10 @@ class TasksScreen(Screen):
     pass
 
 
+class PageScreen(Screen):
+    pass
+
+
 class JournalScreen(Screen):
     pass
 
@@ -619,6 +653,8 @@ class SoloSystemApp(App):
     hp_text = StringProperty("")
     hp_pct = NumericProperty(0)
     gold_text = StringProperty("")
+    page_title = StringProperty("")
+    page_add_text = StringProperty("")
     update_text = StringProperty("")
 
     admin_unlocked = False
@@ -753,11 +789,12 @@ class SoloSystemApp(App):
         self.stats_text = "\n\n".join(
             "[color=%s]%s Attributes[/color]\n[size=28sp][b]%d[/b][/size]   (%d%%)" % (cols[k], k, a[k], round(a[k] * 100.0 / tot))
             for k in CATS)
-        self.extra_text = "Streak: %d days   |   Pending punishments: %d\nBuild 1.7 (%s)" % (d["streak"], len(d["punishments"]), updater.code_label())
+        self.extra_text = "Streak: %d days   |   Pending punishments: %d\nBuild 1.8 (%s)" % (d["streak"], len(d["punishments"]), updater.code_label())
         self.log_text = ""
         self.build_quests()
         self.build_shop()
         self.build_tasks()
+        self.build_page()
         self.build_journal()
         self.build_planner()
         self.build_log()
@@ -801,25 +838,40 @@ class SoloSystemApp(App):
         self.g.save()
         self.refresh()
 
+    def quest_button(self, i):
+        q = self.g.d["quests"][i]
+        mark = "[X]" if q["done"] else "[  ]"
+        tgt = q.get("target", 1)
+        if tgt > 1:
+            label = "%s  %s   %g / %g %s\n(+%d EXP | fail: -%d EXP)" % (
+                mark, q["name"], q.get("progress", 0), tgt, q.get("unit", ""), q["reward"], q["penalty"])
+        else:
+            label = "%s  %s   (+%d EXP | fail: -%d EXP)" % (mark, q["name"], q["reward"], q["penalty"])
+        b = Button(text=label, size_hint_y=None, height=dp(60), background_normal="", disabled=q["done"],
+                   background_color=(0.05, 0.3, 0.2, 1) if q["done"] else (0.05, 0.18, 0.35, 1),
+                   color=(0.6, 0.95, 1, 1), halign="center")
+        b.bind(width=lambda w, v: setattr(w, "text_size", (v - 16, None)))
+        b.bind(on_release=lambda w, idx=i: self.quest_tapped(idx))
+        return b
+
     def build_quests(self):
         box = self.screen("quests").ids.quest_box
         box.clear_widgets()
         d = self.g.d
-        for i, q in enumerate(d["quests"]):
-            mark = "[X]" if q["done"] else "[  ]"
-            tgt = q.get("target", 1)
-            if tgt > 1:
-                label = "%s  %s   %g / %g %s\n(+%d EXP | fail: -%d EXP)" % (
-                    mark, q["name"], q.get("progress", 0), tgt, q.get("unit", ""), q["reward"], q["penalty"])
-            else:
-                label = "%s  %s   (+%d EXP | fail: -%d EXP)" % (mark, q["name"], q["reward"], q["penalty"])
-            b = Button(text=label,
-                       size_hint_y=None, height=dp(60), background_normal="", disabled=q["done"],
-                       background_color=(0.05, 0.3, 0.2, 1) if q["done"] else (0.05, 0.18, 0.35, 1),
-                       color=(0.6, 0.95, 1, 1), halign="center")
-            b.bind(width=lambda w, v: setattr(w, "text_size", (v - 16, None)))
-            b.bind(on_release=lambda w, idx=i: self.quest_tapped(idx))
-            box.add_widget(b)
+        cat = lambda q: norm_cat(q.get("stat", ""))
+        groups = [("PROMOTION TRIAL", lambda q: q.get("trial")),
+                  ("PHYSICAL", lambda q: not q.get("trial") and cat(q) == "Physical"),
+                  ("MENTAL", lambda q: not q.get("trial") and cat(q) == "Mental"),
+                  ("SPIRITUAL", lambda q: not q.get("trial") and cat(q) == "Spiritual"),
+                  ("OTHER", lambda q: not q.get("trial") and not cat(q))]
+        for title, test in groups:
+            idxs = [i for i, q in enumerate(d["quests"]) if test(q)]
+            if not idxs:
+                continue
+            done = sum(1 for i in idxs if d["quests"][i]["done"])
+            box.add_widget(self.header("%s    %d / %d" % (title, done, len(idxs))))
+            for i in idxs:
+                box.add_widget(self.quest_button(i))
         for i, p in enumerate(d["punishments"]):
             b = Button(text="PENALTY: %s\n(tap when completed)" % p, size_hint_y=None, height=dp(70),
                        background_normal="", background_color=(0.4, 0.05, 0.08, 1), halign="center",
@@ -877,7 +929,7 @@ class SoloSystemApp(App):
     def ask_done(self, text):
         self.dialog("[ SYSTEM ]", "Did you already do this?\n[b]%s[/b]" % text,
                     [("YES, I DID IT", lambda v: self.process_habit(text, back=lambda: self.ask_done(text))),
-                     ("NOT YET  (add to to-do)", lambda v: self.ask_reminder(text, back=lambda: self.ask_done(text))),
+                     ("NOT YET  (add to to-do)", lambda v: self.new_todo_flow(text, back=lambda: self.ask_done(text))),
                      ("BACK", lambda v: self.restore_log_text(text))], size=(0.9, 0.55))
 
     def restore_log_text(self, text):
@@ -940,9 +992,9 @@ class SoloSystemApp(App):
         h["stat"] = cat
         self.show_result(self.g.apply_habit(text, h["value"], cat))
 
-    def ask_category(self, text, callback, back=None):
+    def ask_category(self, text, callback, back=None, prompt=""):
         box = BoxLayout(orientation="vertical", spacing=dp(6), padding=dp(8))
-        box.add_widget(Label(text="Which kind of habit is this?\n[b]%s[/b]" % text, markup=True, color=(0.7, 1, 1, 1)))
+        box.add_widget(Label(text=(prompt or "Which kind of habit is this?\n[b]%s[/b]" % text), markup=True, color=(0.7, 1, 1, 1)))
         pop = Popup(title="[ SYSTEM ]", content=box, size_hint=(0.9, 0.7), title_color=(0.25, 0.85, 1, 1),
                     separator_color=(0.25, 0.85, 1, 1), background_color=(0.02, 0.05, 0.12, 1))
         for cat in CATS:
@@ -1034,25 +1086,36 @@ class SoloSystemApp(App):
             box.add_widget(b)
         pop.open()
 
-    def ask_reminder(self, text, back=None, prefill=""):
+    def ask_reminder(self, text, back=None, prefill="", level="mid"):
         def save(v, tomorrow):
             due = due_from(v, tomorrow)
             if due is None:
                 self.popup("[ REMINDER ]", "Type a time like 07:30 or 6:15pm.")
                 return False
-            self.save_todo(text, due)
+            self.save_todo(text, due, level)
         self.dialog("[ TO-DO ]", "When should I remind you?\n[b]%s[/b]" % text,
                     [("REMIND ME  (next time it hits)", lambda v: save(v, False)),
                      ("REMIND TOMORROW", lambda v: save(v, True)),
-                     ("NO REMINDER", lambda v: self.save_todo(text, None)),
+                     ("NO REMINDER", lambda v: self.save_todo(text, None, level)),
                      ("BACK", lambda v: back() if back else None)],
                     hint="Time, e.g. 07:30 or 6:15pm", text_in=prefill, size=(0.92, 0.8))
 
-    def save_todo(self, text, due):
-        self.g.add_todo(text, due)
+    def new_todo_flow(self, text, back=None, prefill=""):
+        """what -> how hard -> reminder time"""
+        def pick(level):
+            self.ask_reminder(text, back=lambda: self.new_todo_flow(text, back, prefill), prefill=prefill, level=level)
+        self.ask_difficulty(text, pick, back)
+
+    def ask_difficulty(self, text, cb, back=None):
+        self.dialog("[ TO-DO ]", "How hard is it?\n[b]%s[/b]\nHard tasks are listed first." % text,
+                    [("HARD", lambda v: cb("hard")), ("MEDIUM", lambda v: cb("mid")), ("EASY", lambda v: cb("easy")),
+                     ("BACK", lambda v: back() if back else None)], size=(0.9, 0.6))
+
+    def save_todo(self, text, due, level="mid"):
+        self.g.add_todo(text, due, level)
         self.refresh()
         when = "no reminder" if not due else "reminder " + time.strftime("%b %d, %H:%M", time.localtime(due))
-        self.popup("[ TO-DO ]", "Saved: [b]%s[/b]\n(%s)\nFind it in the TASKS tab." % (text, when))
+        self.popup("[ TO-DO ]", "Saved: [b]%s[/b]\n(%s, %s)\nFind it in TASKS, then TO-DO LIST." % (text, {"hard": "hard", "mid": "medium", "easy": "easy"}[level], when))
 
     def header(self, text):
         return Label(text="[b]%s[/b]" % text, markup=True, size_hint_y=None, height=dp(30), color=(1, 0.85, 0.3, 1))
@@ -1078,37 +1141,59 @@ class SoloSystemApp(App):
     def build_tasks(self):
         box = self.screen("tasks").ids.task_box
         box.clear_widgets()
-        d, now = self.g.d, time.time()
-        box.add_widget(self.mkbtn("OPEN JOURNAL BOOK", lambda w: self.open_journal()))
-        box.add_widget(self.mkbtn("OPEN TOMORROW PLANNER", lambda w: self.open_planner()))
-        box.add_widget(self.header("ROUTINE  (tap = log it, once a day)"))
-        for r in d["routines"]:
+        d = self.g.d
+        left = sum(1 for r in d["routines"] if not self.g.routine_done_today(r))
+        hard = sum(1 for t in d["todos"] if t.get("level") == "hard")
+        items = [
+            ("OPEN ROUTINE\n%d left today (of %d)" % (left, len(d["routines"])), lambda w: self.open_page("routine")),
+            ("OPEN TO-DO LIST\n%d open (%d hard)" % (len(d["todos"]), hard), lambda w: self.open_page("todo")),
+            ("OPEN MASTERY\n%d skills" % len(d["mastery"]), lambda w: self.open_page("mastery")),
+            ("OPEN QUIT TRACKER\n%d targets" % len(d["quits"]), lambda w: self.open_page("quit")),
+            ("OPEN JOURNAL BOOK\n%d entries" % len(d["journal"]), lambda w: self.open_journal()),
+            ("OPEN TOMORROW PLANNER\n%d planned for tomorrow" % len(self.g.plans_for(tomorrow_str())), lambda w: self.open_planner()),
+        ]
+        for text, cb in items:
+            box.add_widget(self.mkbtn(text, cb))
+
+    page_kind = "routine"
+
+    def open_page(self, kind):
+        self.page_kind = kind
+        self.refresh()
+        self.go("page")
+
+    def page_add(self):
+        {"routine": self.add_routine_dialog, "todo": self.add_todo_dialog,
+         "quit": self.add_quit_dialog, "mastery": self.add_mastery_dialog}[self.page_kind]()
+
+    def build_page(self):
+        names = {"routine": ("[ ROUTINE ]", "+ ADD ROUTINE"), "todo": ("[ TO-DO LIST ]", "+ ADD TO-DO"),
+                 "quit": ("[ QUIT TRACKER ]", "+ ADD SOMETHING TO QUIT"), "mastery": ("[ MASTERY ]", "+ ADD A SKILL TO MASTER")}
+        self.page_title, self.page_add_text = names[self.page_kind]
+        box = self.screen("page").ids.page_box
+        box.clear_widgets()
+        getattr(self, "page_" + self.page_kind)(box)
+
+    def page_routine(self, box):
+        box.add_widget(self.header("Tap one to log it  (once a day)"))
+        for r in self.g.d["routines"]:
             done = self.g.routine_done_today(r)
-            box.add_widget(self.task_row(("[X]  " if done else "[  ]  ") + r["text"],
-                                         lambda r=r: self.tap_routine(r),
+            box.add_widget(self.task_row(("[X]  " if done else "[  ]  ") + r["text"], lambda r=r: self.tap_routine(r),
                                          lambda r=r: (self.g.remove_routine(r["id"]), self.refresh()),
                                          disabled=done, color=(0.05, 0.3, 0.2, 1) if done else (0.05, 0.18, 0.35, 1)))
-        box.add_widget(self.mkbtn("+ ADD ROUTINE", lambda w: self.dialog(
-            "[ ROUTINE ]", "Something you do every day.\nIt logs with one tap.",
-            [("ADD", self.save_routine), ("CANCEL", lambda v: None)], hint="e.g. Meditate, Brush teeth")))
-        box.add_widget(self.header("TO-DO  (tap when you have done it)"))
-        for t in d["todos"]:
-            due = t.get("due")
-            when = "No reminder" if not due else "Remind: " + time.strftime("%b %d, %H:%M", time.localtime(due))
-            late = bool(due) and due <= now
-            box.add_widget(self.task_row("%s\n%s" % (t["text"], when), lambda t=t: self.tap_todo(t),
-                                         lambda t=t: (self.g.remove_todo(t["id"]), self.refresh()),
-                                         color=(0.4, 0.1, 0.12, 1) if late else (0.05, 0.18, 0.35, 1)))
-        box.add_widget(self.mkbtn("+ ADD TO-DO", lambda w: self.dialog(
-            "[ TO-DO ]", "What do you need to do?",
-            [("NEXT", self.todo_next), ("CANCEL", lambda v: None)], hint="e.g. Run 5 km")))
-        self.build_quits(box)
 
-    def go(self, name):
-        self.root_widget.ids.sm.current = name
+    def page_todo(self, box):
+        box.add_widget(self.header("Hard tasks first"))
+        now = time.time()
+        tag = {"hard": "[HARD]", "mid": "[MEDIUM]", "easy": "[EASY]"}
+        color = {"hard": (0.45, 0.1, 0.12, 1), "mid": (0.42, 0.33, 0.05, 1), "easy": (0.08, 0.35, 0.2, 1)}
+        for t in self.g.todos_sorted():
+            lvl, due = t.get("level", "mid"), t.get("due")
+            when = "No reminder" if not due else ("OVERDUE  " if due <= now else "Remind: ") + time.strftime("%b %d, %H:%M", time.localtime(due))
+            box.add_widget(self.task_row("%s  %s\n%s" % (tag.get(lvl, "[MEDIUM]"), t["text"], when), lambda t=t: self.tap_todo(t),
+                                         lambda t=t: (self.g.remove_todo(t["id"]), self.refresh()), color=color.get(lvl, color["mid"])))
 
-    def build_quits(self, box):
-        box.add_widget(self.header("QUIT TRACKER  (days clean)"))
+    def page_quit(self, box):
         now = time.time()
         for q in self.g.d["quits"]:
             best = max(q.get("best", 0), now - q["since"])
@@ -1116,11 +1201,72 @@ class SoloSystemApp(App):
                                          lambda q=q: self.dialog("[ QUIT TRACKER ]", "Did you slip on [b]%s[/b]?\nThis restarts the counter." % q["name"],
                                                                  [("YES, I SLIPPED", lambda v: (self.g.slip_quit(q["id"]), self.refresh())),
                                                                   ("BACK", lambda v: None)], size=(0.9, 0.4)),
-                                         lambda q=q: (self.g.remove_quit(q["id"]), self.refresh()),
-                                         color=(0.2, 0.12, 0.4, 1)))
-        box.add_widget(self.mkbtn("+ ADD SOMETHING TO QUIT", lambda w: self.dialog(
-            "[ QUIT TRACKER ]", "What do you want to quit?\nLogging a bad habit with this name restarts it.",
-            [("ADD", self.save_quit), ("BACK", lambda v: None)], hint="e.g. TikTok")))
+                                         lambda q=q: (self.g.remove_quit(q["id"]), self.refresh()), color=(0.2, 0.12, 0.4, 1)))
+
+    def page_mastery(self, box):
+        self.g.roll_mastery()
+        box.add_widget(self.header("Tap a skill to add today's practice"))
+        for m in self.g.d["mastery"]:
+            cell = BoxLayout(orientation="vertical", size_hint_y=None, height=dp(86), spacing=dp(2))
+            text = "%s  -  %s\n%.1f%%    today %d / %d min    streak %d" % (
+                m["name"], mastery_rank(m["percent"]), m["percent"], m["today"], m["minutes"], m["streak"])
+            cell.add_widget(self.task_row(text, lambda m=m: self.practice_dialog(m),
+                                          lambda m=m: self.dialog("[ MASTERY ]", "Delete [b]%s[/b] and all its progress?" % m["name"],
+                                                                  [("YES, DELETE", lambda v: (self.g.remove_mastery(m["id"]), self.refresh())),
+                                                                   ("BACK", lambda v: None)], size=(0.9, 0.4)),
+                                          color=(0.05, 0.3, 0.2, 1) if m["met"] else (0.15, 0.15, 0.4, 1)))
+            cell.add_widget(Factory.Bar(value=m["percent"] / 100.0, size_hint_y=None, height=dp(18)))
+            box.add_widget(cell)
+
+    def add_routine_dialog(self):
+        self.dialog("[ ROUTINE ]", "Something you do every day.\nIt logs with one tap.",
+                    [("ADD", self.save_routine), ("BACK", lambda v: None)], hint="e.g. Meditate, Brush teeth")
+
+    def add_quit_dialog(self):
+        self.dialog("[ QUIT TRACKER ]", "What do you want to quit?\nLogging a bad habit with this name restarts it.",
+                    [("ADD", self.save_quit), ("BACK", lambda v: None)], hint="e.g. TikTok")
+
+    def add_todo_dialog(self):
+        self.dialog("[ TO-DO ]", "What do you need to do?", [("NEXT", self.todo_next), ("BACK", lambda v: None)], hint="e.g. Run 5 km")
+
+    def add_mastery_dialog(self):
+        def save(v):
+            parts = [p.strip() for p in v.split("|")]
+            try:
+                name = parts[0]
+                minutes = int(parts[1]) if len(parts) > 1 and parts[1] else 60
+                days = int(parts[2]) if len(parts) > 2 and parts[2] else 365
+                if not name or minutes < 1 or days < 1:
+                    raise ValueError
+            except ValueError:
+                self.popup("[ MASTERY ]", "Type it like:  Coding | 60 | 365\n(skill | minutes a day | days to master)")
+                return False
+            self.ask_category(name, lambda c: self.save_mastery(name, minutes, days, c),
+                              back=self.add_mastery_dialog, prompt="What kind of skill is this?\n[b]%s[/b]" % name)
+        self.dialog("[ MASTERY ]", "What do you want to master?\nFormat:  skill | minutes a day | days to master\nExample:  Coding | 60 | 365",
+                    [("NEXT", save), ("BACK", lambda v: None)], hint="Coding | 60 | 365", size=(0.92, 0.6))
+
+    def save_mastery(self, name, minutes, days, cat):
+        self.g.add_mastery(name, minutes, days, cat)
+        self.refresh()
+        self.popup("[ MASTERY ]", "Added: [b]%s[/b]\nPractice %d min a day for about %d days to reach 100%%." % (name, minutes, days))
+
+    def practice_dialog(self, m):
+        def save(v):
+            try:
+                mins = int(round(float(v)))
+            except ValueError:
+                return False
+            if mins < 1:
+                return False
+            msgs = self.g.practice(m["id"], mins)
+            self.refresh()
+            self.popup("[ MASTERY ]", "\n".join(msgs) or "Practice added.")
+        self.dialog("[ MASTERY ]", "[b]%s[/b]\nHow many minutes did you just practice?\n(goal today: %d min)" % (m["name"], m["minutes"]),
+                    [("ADD", save), ("BACK", lambda v: None)], hint="minutes, e.g. 60", size=(0.9, 0.55))
+
+    def go(self, name):
+        self.root_widget.ids.sm.current = name
 
     def save_quit(self, v):
         if not v.strip():
@@ -1301,7 +1447,7 @@ class SoloSystemApp(App):
                 text = ("[X]  " if p["done"] else "[  ]  ") + ("(carried)  " if p in carried else "") + (p["time"] + "   " if p["time"] else "") + p["text"]
                 box.add_widget(self.task_row(text, lambda p=p: (self.g.toggle_plan(p["id"]), self.refresh()),
                                              lambda p=p: (self.g.remove_plan(p["id"]), self.refresh()),
-                                             extra=("TO-DO", lambda p=p: self.ask_reminder(p["text"], prefill=p["time"])),
+                                             extra=("TO-DO", lambda p=p: self.new_todo_flow(p["text"], prefill=p["time"])),
                                              color=(0.05, 0.3, 0.2, 1) if p["done"] else (0.05, 0.18, 0.35, 1)))
 
     def open_journal(self):
@@ -1313,7 +1459,10 @@ class SoloSystemApp(App):
             if not v.strip():
                 return False
             first = self.g.add_journal(v)
+            qmsgs = self.g.complete_by_keyword("journal")
             self.refresh()
+            if qmsgs:
+                self.popup("[ QUEST ]", "Journal quest complete!\n" + "\n".join(qmsgs))
             if first:
                 self._after_log = None
                 self.process_habit("Finished journal entry")  # also shows up in the LOG tab
@@ -1352,7 +1501,7 @@ class SoloSystemApp(App):
     def todo_next(self, v):
         if not v.strip():
             return False
-        self.ask_reminder(v.strip())
+        self.new_todo_flow(v.strip(), back=self.add_todo_dialog)
 
     def tap_routine(self, r):
         self.dialog("[ ROUTINE ]", "Log this routine as done?\n[b]%s[/b]" % r["text"],
