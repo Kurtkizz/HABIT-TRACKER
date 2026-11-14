@@ -445,7 +445,7 @@ KV = """
                 size_hint_y: None
                 height: dp(260)
             L:
-                text: 'Daily quests  (name | reward | penalty | punishment | target | unit | category)'
+                text: 'Daily quests  (name | reward | penalty | punishment | target | unit | category | growth per 10 levels)'
                 text_size: self.width, None
                 halign: 'left'
                 valign: 'middle'
@@ -560,7 +560,7 @@ KV = """
                 height: dp(48)
                 on_release: app.restore_backup()
             SB:
-                text: 'TOGGLE QUEST SCALING'
+                text: 'TOGGLE QUEST GROWTH'
                 size_hint_y: None
                 height: dp(48)
                 on_release: app.toggle_scaling()
@@ -885,7 +885,7 @@ class SoloSystemApp(App):
         self.stats_text = "\n\n".join(
             "[color=%s]%s Attributes[/color]\n[size=28sp][b]%d[/b][/size]   (%d%%)" % (cols[k], k, a[k], round(a[k] * 100.0 / tot))
             for k in CATS)
-        self.extra_text = "Streak: %d days   |   Pending punishments: %d\nBuild 1.9 (%s)" % (d["streak"], len(d["punishments"]), updater.code_label())
+        self.extra_text = "Streak: %d days   |   Pending punishments: %d\nBuild 1.10 (%s)" % (d["streak"], len(d["punishments"]), updater.code_label())
         self.log_text = ""
         self.build_quests()
         self.build_shop()
@@ -974,7 +974,7 @@ class SoloSystemApp(App):
                        background_normal="", background_color=(0.4, 0.05, 0.08, 1), halign="center",
                        color=(1, 0.8, 0.8, 1))
             b.bind(width=lambda w, v: setattr(w, "text_size", (v - 16, None)))
-            b.bind(on_release=lambda w, idx=i: self.finish_punishment(idx))
+            b.bind(on_release=lambda w, idx=i: self.confirm_punishment(idx))
             box.add_widget(b)
 
     def update_timer(self):
@@ -1103,10 +1103,30 @@ class SoloSystemApp(App):
         pop.open()
 
     def quest_tapped(self, i):
-        if self.g.d["quests"][i].get("target", 1) > 1:
+        q = self.g.d["quests"][i]
+        if q.get("target", 1) > 1 and q.get("progress", 0) < q["target"]:
             self.ask_amount(i)
+        else:  # a plain quest: ask first, in case it was an accidental tap
+            self.dialog("[ QUEST ]", "Did you really finish\n[b]%s[/b] ?" % q["name"],
+                        [("YES, I FINISHED IT", lambda v: self.finish_quest(i)), ("BACK", lambda v: None)], size=(0.9, 0.4))
+
+    def confirm_progress(self, i, amount, whole=False):
+        q = self.g.d["quests"][i]
+        unit = q.get("unit", "")
+        left = q.get("target", 1) - q.get("progress", 0)
+        if whole:
+            text = "Mark [b]%s[/b] as FULLY done?\nThat adds the remaining %g %s." % (q["name"], amount, unit)
         else:
-            self.finish_quest(i)
+            text = "Add [b]%g %s[/b] to [b]%s[/b] ?" % (amount, unit, q["name"])
+            if amount >= left:
+                text += "\nThis finishes the quest."
+        self.dialog("[ QUEST ]", text, [("YES, I DID IT", lambda v: self.apply_progress(i, amount)),
+                                         ("BACK", lambda v: self.ask_amount(i))], size=(0.9, 0.45))
+
+    def confirm_punishment(self, i):
+        p = self.g.d["punishments"][i]
+        self.dialog("[ PENALTY ZONE ]", "Did you really complete this penalty?\n[b]%s[/b]" % p,
+                    [("YES, DONE", lambda v: self.finish_punishment(i)), ("BACK", lambda v: None)], size=(0.9, 0.4))
 
     def ask_amount(self, i):
         q = self.g.d["quests"][i]
@@ -1128,11 +1148,11 @@ class SoloSystemApp(App):
             except ValueError:
                 return
             pop.dismiss()
-            self.apply_progress(i, n)
+            self.confirm_progress(i, n)
 
         def full(*a):
             pop.dismiss()
-            self.apply_progress(i, target - done)
+            self.confirm_progress(i, target - done, whole=True)
         for text, cb in (("ADD", add), ("COMPLETE ALL", full)):
             b = Button(text=text, background_normal="", background_color=(0.05, 0.18, 0.35, 1), color=(0.6, 0.95, 1, 1))
             b.bind(on_release=cb)
@@ -1512,7 +1532,7 @@ class SoloSystemApp(App):
     def toggle_scaling(self):
         self.g.d["scale_quests"] = not self.g.d.get("scale_quests", True)
         self.g.save()
-        self.popup("[ ADMIN ]", "Quest scaling with rank is now %s.\n(Applies to quests issued from the next day.)" %
+        self.popup("[ ADMIN ]", "Quest growth every 10 levels is now %s.\n(Applies to quests issued from the next day.)" %
                    ("ON" if self.g.d["scale_quests"] else "OFF"))
 
     def open_planner(self):

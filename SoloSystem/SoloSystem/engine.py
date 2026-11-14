@@ -121,10 +121,10 @@ DEFAULT_HABITS = [
 ]
 
 DEFAULT_QUESTS = [
-    {"name": "Push-ups", "reward": 40, "penalty": 30, "punishment": "Penalty Zone: 50 extra push-ups", "target": 100, "unit": "reps", "stat": "Physical"},
-    {"name": "Sit-ups", "reward": 40, "penalty": 30, "punishment": "Penalty Zone: 50 extra sit-ups", "target": 100, "unit": "reps", "stat": "Physical"},
-    {"name": "Squats", "reward": 40, "penalty": 30, "punishment": "Penalty Zone: 50 extra squats", "target": 100, "unit": "reps", "stat": "Physical"},
-    {"name": "Run", "reward": 60, "penalty": 40, "punishment": "Penalty Zone: run 3 km extra", "target": 10, "unit": "km", "stat": "Physical"},
+    {"name": "Push-ups", "reward": 40, "penalty": 30, "punishment": "Penalty Zone: 25 extra push-ups", "target": 50, "step": 5, "unit": "reps", "stat": "Physical"},
+    {"name": "Sit-ups", "reward": 40, "penalty": 30, "punishment": "Penalty Zone: 25 extra sit-ups", "target": 50, "step": 5, "unit": "reps", "stat": "Physical"},
+    {"name": "Squats", "reward": 40, "penalty": 30, "punishment": "Penalty Zone: 25 extra squats", "target": 50, "step": 5, "unit": "reps", "stat": "Physical"},
+    {"name": "Run", "reward": 60, "penalty": 40, "punishment": "Penalty Zone: run 1 km extra", "target": 3, "step": 0.5, "unit": "km", "stat": "Physical"},
     {"name": "Read", "reward": 30, "penalty": 20, "punishment": "Penalty Zone: read 5 extra pages tomorrow", "target": 10, "unit": "pages", "stat": "Mental"},
     {"name": "Study", "reward": 35, "penalty": 25, "punishment": "Penalty Zone: 15 extra minutes of study tomorrow", "target": 30, "unit": "minutes", "stat": "Mental"},
     {"name": "Write a page", "reward": 25, "penalty": 15, "punishment": "Penalty Zone: write two pages tomorrow", "target": 1, "unit": "", "stat": "Mental"},
@@ -188,10 +188,6 @@ def rank_index(level):
     return idx
 
 
-# daily quest targets (reps / km) grow with rank: E, D, C, B, A, S, SS, SSS, Transcendent, Absolute Apex
-RANK_SCALE = [1.0, 1.1, 1.25, 1.4, 1.6, 1.8, 2.0, 2.3, 2.6, 3.0]
-
-
 def log_line(e):
     if isinstance(e, str):  # entries saved by older versions
         return e
@@ -238,8 +234,9 @@ def text_to_habits(text):
 
 
 def quests_to_text(qs):
-    return "\n".join("%s | %d | %d | %s | %g | %s | %s" % (q["name"], q["reward"], q["penalty"], q["punishment"],
-                                                       q.get("target", 1), q.get("unit", ""), q.get("stat", "")) for q in qs)
+    return "\n".join("%s | %d | %d | %s | %g | %s | %s | %g" % (q["name"], q["reward"], q["penalty"], q["punishment"],
+                                                              q.get("target", 1), q.get("unit", ""), q.get("stat", ""),
+                                                              q.get("step", 0)) for q in qs)
 
 
 def text_to_quests(text):
@@ -252,7 +249,8 @@ def text_to_quests(text):
             target = float(p[4]) if len(p) > 4 and p[4] else 1.0
             out.append({"name": p[0], "reward": int(p[1]), "penalty": int(p[2]), "punishment": p[3],
                         "target": max(target, 1.0), "unit": p[5] if len(p) > 5 else "",
-                        "stat": norm_cat(p[6]) if len(p) > 6 and p[6] else guess_cat(p[0])})
+                        "stat": norm_cat(p[6]) if len(p) > 6 and p[6] else guess_cat(p[0]),
+                        "step": max(float(p[7]), 0.0) if len(p) > 7 and p[7] else 0})
         except ValueError:
             continue
     return out
@@ -275,7 +273,7 @@ class Game:
             "cycle_start": time.time(), "quests": [], "punishments": [], "log": [],
             "hp": hp_max(1), "gold": 0, "title": "Weakest Hunter", "titles": ["Weakest Hunter"],
             "routines": [], "todos": [], "next_id": 1, "journal": [], "plans": [],
-            "rank_cleared": 0, "quests_v2": True, "mastery": [], "scale_quests": True, "history": {}, "rewards": [], "redeemed": [], "quits": [],
+            "rank_cleared": 0, "quests_v2": True, "quests_v3": True, "mastery": [], "scale_quests": True, "history": {}, "rewards": [], "redeemed": [], "quits": [],
             "unseen_arrival": False, "warn": {"cycle": 0, "sent": []},
             "best_streak": 0, "counts": {"habits": 0, "quests": 0, "deaths": 0},
         }
@@ -305,10 +303,26 @@ class Game:
                     if self.d.get("quests"):
                         self.d["quests"].append(self.make_quest(q))
             self.d["quests_v2"] = True
+        needs_v3 = not self.d.get("quests_v3")  # (checked before the defaults below fill the key in)
         for k, v in base.items():
             self.d.setdefault(k, v)
         if not self.d["quests"]:
             self.new_cycle(self.d["cycle_start"])
+        if needs_v3:  # one-time: beginner push-ups / sit-ups / squats / run that grow every 10 levels
+            fresh = {q["name"].lower(): q for q in DEFAULT_QUESTS}
+            alias = {"100 push-ups": "push-ups", "100 sit-ups": "sit-ups", "100 squats": "squats", "run 10 km": "run"}
+            for key in ("templates", "quests"):
+                for q in self.d.get(key, []):
+                    n = alias.get(q["name"].lower(), q["name"].lower())
+                    if n in ("push-ups", "sit-ups", "squats", "run") and q.get("unit", "").lower() in ("reps", "km"):
+                        src = fresh[n]
+                        q.update(name=src["name"], step=src["step"], punishment=src["punishment"])
+                        if key == "templates":
+                            q["target"] = src["target"]
+                        else:  # today's copy keeps its progress
+                            q["target"] = self.make_quest(src)["target"]
+                            q["progress"] = min(q.get("progress", 0), q["target"])
+            self.d["quests_v3"] = True
         if save:
             self.save()
 
@@ -414,12 +428,10 @@ class Game:
         return True
 
     def make_quest(self, t):
-        """Today's copy of a quest template. Rep / km targets grow with your rank."""
+        """Today's copy of a quest template. A quest with a "step" grows by that much every 10 levels."""
         q = dict(t, done=False, progress=0)
-        unit = q.get("unit", "").strip().lower()
-        if self.d.get("scale_quests", True) and unit in ("reps", "km") and q.get("target", 1) > 1:
-            mult = RANK_SCALE[min(rank_index(self.d["level"]), self.d.get("rank_cleared", 0))]
-            q["target"] = round(q["target"] * mult / 5) * 5 if unit == "reps" else round(q["target"] * mult * 2) / 2
+        if self.d.get("scale_quests", True) and q.get("step") and q.get("target", 1) > 1:
+            q["target"] = q["target"] + q["step"] * (self.d["level"] // 10)
         return q
 
     def set_level(self, level):
