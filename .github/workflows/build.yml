@@ -2,6 +2,15 @@ name: Build APK
 on:
   push:
   workflow_dispatch:
+    inputs:
+      camera:
+        description: "Camera rep counter (adds Google ML Kit pose detection) - experimental"
+        type: boolean
+        default: false
+      widget:
+        description: "Home screen widget - experimental"
+        type: boolean
+        default: false
 jobs:
   build:
     runs-on: ubuntu-22.04
@@ -37,6 +46,21 @@ jobs:
           else
             echo "::warning::Secret DEBUG_KEYSTORE_B64 not found - this build gets a temporary key and cannot update the installed app."
           fi
+      - name: Apply optional features
+        working-directory: SoloSystem/SoloSystem
+        env:
+          CAMERA: ${{ inputs.camera }}
+          WIDGET: ${{ inputs.widget }}
+        run: |
+          if [ "$CAMERA" = "true" ]; then
+            sed -i '/^android.archs/a android.enable_androidx = True\nandroid.gradle_dependencies = com.google.mlkit:pose-detection:18.0.0-beta4' buildozer.spec
+            echo "Camera rep counter: ML Kit pose detection added"
+          fi
+          if [ "$WIDGET" = "true" ]; then
+            sed -i '/^android.archs/a p4a.hook = p4a_widget_hook.py' buildozer.spec
+            echo "Home screen widget: build hook added"
+          fi
+          grep -n "gradle_dependencies\|p4a.hook\|enable_androidx" buildozer.spec || echo "No optional features: standard build"
       - name: Build APK
         shell: bash
         working-directory: SoloSystem/SoloSystem
@@ -64,5 +88,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: TheSystem-apk
+          name: ${{ (inputs.camera || inputs.widget) && 'TheSystem-apk-experimental' || 'TheSystem-apk' }}
           path: SoloSystem/SoloSystem/bin/*.apk
