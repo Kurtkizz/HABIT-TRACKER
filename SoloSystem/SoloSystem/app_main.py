@@ -1,11 +1,15 @@
+import math
 import os
+import struct
 import threading
 import time
 import traceback
+import wave
 from kivy.app import App
 from kivy.lang import Builder
 from kivy.clock import Clock
 from kivy.core.clipboard import Clipboard
+from kivy.animation import Animation
 from kivy.base import ExceptionHandler, ExceptionManager
 from kivy.graphics import Color, Rectangle
 from kivy.uix.widget import Widget
@@ -18,10 +22,10 @@ from kivy.uix.button import Button
 from kivy.uix.gridlayout import GridLayout
 from kivy.uix.label import Label
 from kivy.uix.popup import Popup
-from kivy.uix.screenmanager import Screen
+from kivy.uix.screenmanager import FadeTransition, Screen
 from kivy.uix.textinput import TextInput
 
-from engine import Game, mastery_rank, due_from, hours_text, today_str, tomorrow_str, CATS, norm_cat, SHOP, TITLES, hp_max, rank_for, exp_needed, log_line, days_text, habits_to_text, text_to_habits, quests_to_text, text_to_quests
+from engine import Game, DAY_NAMES, parse_days, week_id, mastery_rank, due_from, hours_text, today_str, tomorrow_str, CATS, norm_cat, SHOP, TITLES, hp_max, rank_for, exp_needed, log_line, days_text, habits_to_text, text_to_habits, quests_to_text, text_to_quests
 
 import loader
 import updater
@@ -39,6 +43,36 @@ except ImportError:
     runtrack = None
 
 Window.softinput_mode = "below_target"
+
+THEMES = {
+    "System": dict(acc=[0.25, 0.85, 1, 1], txt=[0.6, 0.95, 1, 1], btn=[0.05, 0.18, 0.35, 1], pbg=[0.02, 0.05, 0.12, 1],
+                   lt=[0.7, 1, 1, 1], panel=[0.03, 0.07, 0.16, 0.95], bg=[0.01, 0.02, 0.06, 1]),
+    "Shadow": dict(acc=[0.65, 0.35, 1, 1], txt=[0.85, 0.7, 1, 1], btn=[0.2, 0.08, 0.38, 1], pbg=[0.06, 0.02, 0.12, 1],
+                   lt=[0.9, 0.8, 1, 1], panel=[0.08, 0.04, 0.16, 0.95], bg=[0.03, 0.01, 0.07, 1]),
+    "Monarch": dict(acc=[1, 0.78, 0.25, 1], txt=[1, 0.9, 0.6, 1], btn=[0.3, 0.2, 0.04, 1], pbg=[0.1, 0.07, 0.02, 1],
+                    lt=[1, 0.95, 0.8, 1], panel=[0.12, 0.09, 0.03, 0.95], bg=[0.05, 0.03, 0.01, 1]),
+}
+T = {k: tuple(v) for k, v in THEMES["System"].items()}  # the colours the Python-built widgets use right now
+
+# system sounds are generated as small tone files the first time they are needed
+SFX = {"ding": [(880, .09), (1320, .15)], "quest": [(660, .09), (880, .09), (1320, .22)],
+       "level": [(523, .1), (659, .1), (784, .1), (1047, .35)], "bad": [(220, .18), (165, .3)],
+       "alarm": [(990, .12), (0, .05), (990, .12), (0, .05), (990, .22)], "chime": [(784, .18), (988, .18), (1175, .4)]}
+
+
+def make_wav(path, notes, vol=0.45, rate=22050):
+    frames = bytearray()
+    for freq, dur in notes:
+        n = int(rate * dur)
+        for i in range(n):
+            env = min(1.0, i / (rate * 0.01), (n - i) / (rate * 0.03))  # soft start and end, no clicks
+            v = math.sin(2 * math.pi * freq * i / rate) * env * vol if freq else 0.0
+            frames += struct.pack("<h", int(v * 32767))
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(bytes(frames))
 
 
 class Bar(Widget):
@@ -93,27 +127,27 @@ KV = """
 <Panel@BoxLayout>:
     canvas.before:
         Color:
-            rgba: 0.03, 0.07, 0.16, 0.95
+            rgba: app.panel
         Rectangle:
             pos: self.pos
             size: self.size
         Color:
-            rgba: 0.25, 0.85, 1, 1
+            rgba: app.acc
         Line:
             rectangle: self.x, self.y, self.width, self.height
             width: 1.3
 <L@Label>:
-    color: 0.6, 0.95, 1, 1
+    color: app.txt
     markup: True
 <SB@Button>:
     background_normal: ''
-    background_color: 0.05, 0.18, 0.35, 1
-    color: 0.6, 0.95, 1, 1
+    background_color: app.btn
+    color: app.txt
     bold: True
 <TI@TextInput>:
-    background_color: 0.02, 0.05, 0.12, 1
-    foreground_color: 0.7, 1, 1, 1
-    cursor_color: 0.3, 0.9, 1, 1
+    background_color: app.pbg
+    foreground_color: app.lt
+    cursor_color: app.acc
 
 <StatusScreen>:
     BoxLayout:
@@ -164,11 +198,16 @@ KV = """
             text: app.extra_text
             size_hint_y: None
             height: dp(48)
-        SB:
-            text: 'HISTORY'
+        BoxLayout:
             size_hint_y: None
             height: dp(44)
-            on_release: app.open_history()
+            spacing: dp(6)
+            SB:
+                text: 'HISTORY'
+                on_release: app.open_history()
+            SB:
+                text: 'WEEKLY REPORT'
+                on_release: app.open_report()
 
 <LogScreen>:
     BoxLayout:
@@ -366,6 +405,29 @@ KV = """
             size_hint_y: None
             height: dp(48)
             on_release: app.go('tasks')
+
+<ReportScreen>:
+    BoxLayout:
+        orientation: 'vertical'
+        padding: dp(12)
+        spacing: dp(8)
+        L:
+            text: '[b][ WEEKLY SYSTEM REPORT ][/b]'
+            font_size: '20sp'
+            size_hint_y: None
+            height: dp(40)
+        ScrollView:
+            GridLayout:
+                id: report_box
+                cols: 1
+                spacing: dp(6)
+                size_hint_y: None
+                height: self.minimum_height
+        SB:
+            text: 'BACK'
+            size_hint_y: None
+            height: dp(48)
+            on_release: app.go('status')
 
 <ShopScreen>:
     BoxLayout:
@@ -565,6 +627,21 @@ KV = """
                 height: dp(48)
                 on_release: app.toggle_scaling()
             SB:
+                text: 'TOGGLE SOUND'
+                size_hint_y: None
+                height: dp(48)
+                on_release: app.toggle_sound()
+            SB:
+                text: 'UNLOCK ALL THEMES (test)'
+                size_hint_y: None
+                height: dp(48)
+                on_release: app.toggle_unlock_themes()
+            SB:
+                text: 'CAMERA CHECK'
+                size_hint_y: None
+                height: dp(48)
+                on_release: app.camera_check()
+            SB:
                 text: 'VIEW LAST ERROR'
                 size_hint_y: None
                 height: dp(48)
@@ -594,7 +671,7 @@ BoxLayout:
     orientation: 'vertical'
     canvas.before:
         Color:
-            rgba: 0.01, 0.02, 0.06, 1
+            rgba: app.bg
         Rectangle:
             pos: self.pos
             size: self.size
@@ -614,6 +691,8 @@ BoxLayout:
             name: 'planner'
         HistoryScreen:
             name: 'history'
+        ReportScreen:
+            name: 'report'
         QuestScreen:
             name: 'quests'
         ShopScreen:
@@ -687,6 +766,10 @@ class HistoryScreen(Screen):
     pass
 
 
+class ReportScreen(Screen):
+    pass
+
+
 class ShopScreen(Screen):
     pass
 
@@ -708,6 +791,13 @@ class SoloSystemApp(App):
     page_title = StringProperty("")
     page_add_text = StringProperty("")
     update_text = StringProperty("")
+    acc = ListProperty([0.25, 0.85, 1, 1])
+    txt = ListProperty([0.6, 0.95, 1, 1])
+    btn = ListProperty([0.05, 0.18, 0.35, 1])
+    pbg = ListProperty([0.02, 0.05, 0.12, 1])
+    lt = ListProperty([0.7, 1, 1, 1])
+    panel = ListProperty([0.03, 0.07, 0.16, 0.95])
+    bg = ListProperty([0.01, 0.02, 0.06, 1])
 
     admin_unlocked = False
     _after_log = None
@@ -718,6 +808,8 @@ class SoloSystemApp(App):
         self.beat()
         self.g = Game(os.path.join(self.user_data_dir, "system.json"))
         self.root_widget = Builder.load_string(KV)
+        self.root_widget.ids.sm.transition = FadeTransition(duration=0.15)
+        self.apply_theme(self.g.d.get("theme", "System"))
         Clock.schedule_once(lambda dt: self.check_cycle(), 0.5)
         Clock.schedule_once(lambda dt: loader.confirm(), 2)
         Clock.schedule_once(lambda dt: self.check_active_run(), 3)
@@ -784,6 +876,20 @@ class SoloSystemApp(App):
                 "[ ERROR ]", "Something went wrong, but the app kept running:\n[b]%s[/b]\n\nADMIN > VIEW LAST ERROR shows the details." % summary,
                 (1, 0.3, 0.3, 1)), 0)
 
+    def camera_check(self):
+        try:
+            import camera_pose
+            lines = camera_pose.diagnose()
+            try:
+                lines.append("CAMERA permission: " + {True: "granted", False: "NOT granted", None: "unknown"}[notifier.has_permission("android.permission.CAMERA")])
+            except Exception:
+                pass
+        except ImportError:
+            lines = ["camera_pose.py: MISSING - upload the Build 1.9 files to GitHub, build, and install the APK"]
+        lines.append("reps.py: " + ("found" if reps is not None else "MISSING"))
+        lines.append("runtrack.py: " + ("found" if runtrack is not None else "MISSING"))
+        self.popup("[ CAMERA CHECK ]", "\n".join(lines))
+
     def view_error(self):
         try:
             with open(os.path.join(self.user_data_dir, "last_error.txt")) as f:
@@ -847,21 +953,96 @@ class SoloSystemApp(App):
         except Exception:
             pass
 
+    _sounds = {}
+
+    def play(self, name):
+        if not name or not self.g.d.get("sound", True):
+            return
+        try:
+            snd = self._sounds.get(name)
+            if snd is None:
+                path = os.path.join(self.user_data_dir, "sfx_%s.wav" % name)
+                if not os.path.exists(path):
+                    make_wav(path, SFX[name])
+                from kivy.core.audio import SoundLoader
+                snd = self._sounds[name] = SoundLoader.load(path)
+            if snd:
+                snd.stop()
+                snd.volume = 0.7
+                snd.play()
+        except Exception:
+            pass
+
+    def fade_in(self, pop):
+        pop.opacity = 0
+        pop.open()
+        Animation(opacity=1, duration=0.2).start(pop)
+
+    def tween(self, prop, target, steps=10):
+        """Slides a number (the EXP / HP bars) to its new value."""
+        start = getattr(self, prop)
+        if abs(target - start) < 0.5:
+            setattr(self, prop, target)
+            return
+        self._tw = getattr(self, "_tw", {})
+        token = self._tw[prop] = object()
+        count = [0]
+
+        def step(dt):
+            if self._tw.get(prop) is not token:
+                return False
+            count[0] += 1
+            setattr(self, prop, start + (target - start) * count[0] / float(steps))
+            return count[0] < steps
+        Clock.schedule_interval(step, 0.04)
+
+    def apply_theme(self, name):
+        th = THEMES.get(name) or THEMES["System"]
+        T.update({k: tuple(v) for k, v in th.items()})
+        self.acc, self.txt, self.btn, self.pbg = list(th["acc"]), list(th["txt"]), list(th["btn"]), list(th["pbg"])
+        self.lt, self.panel, self.bg = list(th["lt"]), list(th["panel"]), list(th["bg"])
+
+    def equip_theme(self, name):
+        if name not in self.g.unlocked_themes():
+            return
+        self.g.d["theme"] = name
+        self.g.save()
+        self.apply_theme(name)
+        self.refresh()
+        self.play("ding")
+        self.popup("[ THEME ]", "%s theme equipped." % name)
+
+    def toggle_sound(self):
+        self.g.d["sound"] = not self.g.d.get("sound", True)
+        self.g.save()
+        self.play("ding")
+        self.popup("[ ADMIN ]", "System sounds are now %s." % ("ON" if self.g.d["sound"] else "OFF"))
+
+    def toggle_unlock_themes(self):
+        self.g.d["unlock_themes"] = not self.g.d.get("unlock_themes", False)
+        self.g.save()
+        self.refresh()
+        self.popup("[ ADMIN ]", "All themes are now %s (for testing)." % ("UNLOCKED" if self.g.d["unlock_themes"] else "tied to your rank again"))
+
+    _report_week = ""
+
     def vibrate(self, ms=400):
         try:
             notifier.vibrate(ms)
         except Exception:
             pass
 
-    def popup(self, title, text, color=(0.25, 0.85, 1, 1)):
+    def popup(self, title, text, color=None):
+        color = color or T["acc"]
         if "LEVEL UP" in text:
+            self.play("level")
             title, color = "[ LEVEL UP ]", (1, 0.85, 0.3, 1)
             text = text.replace("LEVEL UP!", "[b]LEVEL UP![/b]")
             self.vibrate()
-        lab = Label(text=text, markup=True, color=(0.7, 1, 1, 1), halign="center")
+        lab = Label(text=text, markup=True, color=T["lt"], halign="center")
         lab.bind(width=lambda w, v: setattr(w, "text_size", (v - 20, None)))
-        Popup(title=title, content=lab, size_hint=(0.88, 0.45), title_color=color,
-              separator_color=color, background_color=(0.02, 0.05, 0.12, 1)).open()
+        self.fade_in(Popup(title=title, content=lab, size_hint=(0.88, 0.45), title_color=color,
+                           separator_color=color, background_color=T["pbg"]))
 
     def screen(self, name):
         return self.root_widget.ids.sm.get_screen(name)
@@ -874,10 +1055,10 @@ class SoloSystemApp(App):
         self.level_text = "LEVEL  %d" % d["level"] + ("   (Promotion Trial: Rank %s)" % pend if pend else "")
         self.rank_text = "RANK  %s" % self.g.current_rank()
         self.exp_text = "EXP  %d / %d" % (d["exp"], need)
-        self.exp_pct = d["exp"] * 100.0 / need
+        self.tween("exp_pct", d["exp"] * 100.0 / need)
         hm = hp_max(d["level"])
         self.hp_text = "HP  %d / %d" % (d["hp"], hm)
-        self.hp_pct = d["hp"] * 100.0 / hm
+        self.tween("hp_pct", d["hp"] * 100.0 / hm)
         self.gold_text = "GOLD  %d" % d["gold"]
         a = d["attrs"]
         tot = sum(a.values()) or 1
@@ -885,7 +1066,7 @@ class SoloSystemApp(App):
         self.stats_text = "\n\n".join(
             "[color=%s]%s Attributes[/color]\n[size=28sp][b]%d[/b][/size]   (%d%%)" % (cols[k], k, a[k], round(a[k] * 100.0 / tot))
             for k in CATS)
-        self.extra_text = "Streak: %d days   |   Pending punishments: %d\nBuild 1.10 (%s)" % (d["streak"], len(d["punishments"]), updater.code_label())
+        self.extra_text = "Streak: %d days   |   Pending punishments: %d\nBuild 2.0 (%s)" % (d["streak"], len(d["punishments"]), updater.code_label())
         self.log_text = ""
         self.build_quests()
         self.build_shop()
@@ -896,9 +1077,10 @@ class SoloSystemApp(App):
         self.build_log()
         self.push_widget()
 
-    def mkbtn(self, text, cb, dis=False, color=(0.05, 0.18, 0.35, 1)):
+    def mkbtn(self, text, cb, dis=False, color=None):
+        color = color or T["btn"]
         b = Button(text=text, size_hint_y=None, height=dp(64), background_normal="", disabled=dis,
-                   background_color=color, color=(0.6, 0.95, 1, 1), halign="center")
+                   background_color=color, color=T["txt"], halign="center")
         b.bind(width=lambda w, v: setattr(w, "text_size", (v - 16, None)))
         if cb:
             b.bind(on_release=cb)
@@ -916,12 +1098,21 @@ class SoloSystemApp(App):
             box.add_widget(self.task_row("%s\nCost: %d gold" % (r["name"], r["cost"]), lambda r=r: self.confirm_reward(r),
                                          lambda r=r: (self.g.remove_reward(r["id"]), self.refresh())))
         box.add_widget(self.mkbtn("+ ADD REWARD", lambda w: self.add_reward_dialog()))
+        box.add_widget(Label(text="[b]THEMES  (unlock with your rank)[/b]", markup=True, size_hint_y=None, height=dp(28), color=(1, 0.85, 0.3, 1)))
+        unlocked, need = self.g.unlocked_themes(), {"Shadow": "Reach Rank D", "Monarch": "Reach Rank S"}
+        for name in THEMES:
+            if name in unlocked:
+                on = name == d.get("theme", "System")
+                box.add_widget(self.mkbtn("%s%s theme" % ("[ON]  " if on else "", name), lambda w, n=name: self.equip_theme(n),
+                                          color=(0.05, 0.3, 0.2, 1) if on else None))
+            else:
+                box.add_widget(self.mkbtn("???  %s theme\n%s" % (name, need.get(name, "")), None, dis=True))
         box.add_widget(Label(text="[b]TITLES (tap to equip)[/b]", markup=True, size_hint_y=None, height=dp(28), color=(1, 0.85, 0.3, 1)))
         for name, desc, cond in TITLES:
             if name in d["titles"]:
                 mark = "[EQUIPPED]  " if name == d["title"] else ""
                 box.add_widget(self.mkbtn("%s%s\n%s" % (mark, name, desc), lambda w, n=name: self.equip(n),
-                                          color=(0.05, 0.3, 0.2, 1) if mark else (0.05, 0.18, 0.35, 1)))
+                                          color=(0.05, 0.3, 0.2, 1) if mark else T["btn"]))
             else:
                 box.add_widget(self.mkbtn("???  LOCKED\n%s" % desc, None, dis=True))
 
@@ -935,8 +1126,8 @@ class SoloSystemApp(App):
         self.g.save()
         self.refresh()
 
-    def quest_button(self, i):
-        q = self.g.d["quests"][i]
+    def quest_button(self, i, key="quests"):
+        q = self.g.d[key][i]
         mark = "[X]" if q["done"] else "[  ]"
         tgt = q.get("target", 1)
         if tgt > 1:
@@ -945,16 +1136,26 @@ class SoloSystemApp(App):
         else:
             label = "%s  %s   (+%d EXP | fail: -%d EXP)" % (mark, q["name"], q["reward"], q["penalty"])
         b = Button(text=label, size_hint_y=None, height=dp(60), background_normal="", disabled=q["done"],
-                   background_color=(0.05, 0.3, 0.2, 1) if q["done"] else (0.05, 0.18, 0.35, 1),
-                   color=(0.6, 0.95, 1, 1), halign="center")
+                   background_color=(0.05, 0.3, 0.2, 1) if q["done"] else T["btn"],
+                   color=T["txt"], halign="center")
         b.bind(width=lambda w, v: setattr(w, "text_size", (v - 16, None)))
-        b.bind(on_release=lambda w, idx=i: self.quest_tapped(idx))
+        b.bind(on_release=lambda w, idx=i, k=key: self.quest_tapped(idx, k))
         return b
 
     def build_quests(self):
         box = self.screen("quests").ids.quest_box
         box.clear_widgets()
         d = self.g.d
+        e = d.get("emergency")
+        if e:
+            left = max(0, e["expires"] - time.time())
+            box.add_widget(self.mkbtn("EMERGENCY!  %s\n%s left    (+%d EXP   |   fail: -%d EXP)" % (
+                e["name"].replace("EMERGENCY: ", ""), hours_text(left), e["reward"], e["penalty"]), lambda w: self.dialog(
+                "[ EMERGENCY QUEST ]", "Did you really do it?\n[b]%s[/b]" % e["name"].replace("EMERGENCY: ", ""),
+                [("YES, DONE", lambda v: self.claim_emergency()), ("BACK", lambda v: None)], size=(0.9, 0.4)), color=(0.5, 0.08, 0.08, 1)))
+        if d.get("rest_cycle"):
+            box.add_widget(Label(text="[b]REST DAY[/b]  -  no quests today. Your streak is safe.", markup=True,
+                                 size_hint_y=None, height=dp(44), color=(0.6, 1, 0.7, 1)))
         cat = lambda q: norm_cat(q.get("stat", ""))
         groups = [("PROMOTION TRIAL", lambda q: q.get("trial")),
                   ("PHYSICAL", lambda q: not q.get("trial") and cat(q) == "Physical"),
@@ -969,6 +1170,11 @@ class SoloSystemApp(App):
             box.add_widget(self.header("%s    %d / %d" % (title, done, len(idxs))))
             for i in idxs:
                 box.add_widget(self.quest_button(i))
+        if d.get("wquests"):
+            done = sum(1 for q in d["wquests"] if q["done"])
+            box.add_widget(self.header("WEEKLY QUESTS    %d / %d" % (done, len(d["wquests"]))))
+            for i in range(len(d["wquests"])):
+                box.add_widget(self.quest_button(i, "wquests"))
         for i, p in enumerate(d["punishments"]):
             b = Button(text="PENALTY: %s\n(tap when completed)" % p, size_hint_y=None, height=dp(70),
                        background_normal="", background_color=(0.4, 0.05, 0.08, 1), halign="center",
@@ -1008,6 +1214,21 @@ class SoloSystemApp(App):
             txt = "%s left to finish your daily quests!\nUnfinished: %s" % (hours_text(left), self.g.unfinished_text())
             self.notify("[SYSTEM] Warning", txt)
             self.popup("[ WARNING ]", txt, (1, 0.3, 0.3, 1))
+        for m in self.g.emergency_tick():
+            self.refresh()
+            if m.startswith("EMERGENCY QUEST:"):
+                self.play("alarm")
+                self.vibrate(700)
+                self.notify("[SYSTEM] EMERGENCY QUEST", m)
+                self.popup("[ EMERGENCY QUEST ]", m, (1, 0.3, 0.3, 1))
+            else:
+                self.popup("[ EMERGENCY FAILED ]", m, (1, 0.3, 0.3, 1))
+        if self.g.focus_left() == 0:
+            self.focus_complete()
+        if self.g.report_due() and self._report_week != week_id():
+            self._report_week = week_id()
+            self.notify("[SYSTEM] Weekly report", "Your Weekly System Report is ready.")
+            self.dialog("[ WEEKLY SYSTEM REPORT ]", "Your weekly report is ready.", [("OPEN REPORT", lambda v: self.open_report()), ("LATER", lambda v: None)], size=(0.9, 0.35))
         due = self.g.due_todos()
         if due:
             self.refresh()
@@ -1051,6 +1272,7 @@ class SoloSystemApp(App):
 
     def show_result(self, msgs):
         self.result_text = msgs[0]
+        self.play("ding" if msgs[0].startswith("[GOOD]") else "bad" if msgs[0].startswith("[BAD]") else None)
         cb, self._after_log = self._after_log, None
         if cb:
             cb()
@@ -1063,12 +1285,12 @@ class SoloSystemApp(App):
     def ask_classify(self, text, back=None):
         box = BoxLayout(orientation="vertical", spacing=dp(6), padding=dp(8))
         box.add_widget(Label(text="Unknown habit. Classify it:\n[b]%s[/b]" % text, markup=True,
-                             color=(0.7, 1, 1, 1)))
-        pop = Popup(title="[ SYSTEM ]", content=box, size_hint=(0.9, 0.75), title_color=(0.25, 0.85, 1, 1),
-                    separator_color=(0.25, 0.85, 1, 1), background_color=(0.02, 0.05, 0.12, 1))
+                             color=T["lt"]))
+        pop = Popup(title="[ SYSTEM ]", content=box, size_hint=(0.9, 0.75), title_color=T["acc"],
+                    separator_color=T["acc"], background_color=T["pbg"])
         for label, val in (("EXCELLENT  +40", 40), ("GOOD  +20", 20), ("NEUTRAL  0", 0), ("BAD  -10", -10), ("SEVERE  -40", -40)):
-            b = Button(text=label, background_normal="", background_color=(0.05, 0.18, 0.35, 1),
-                       color=(0.6, 0.95, 1, 1), size_hint_y=None, height=dp(44))
+            b = Button(text=label, background_normal="", background_color=T["btn"],
+                       color=T["txt"], size_hint_y=None, height=dp(44))
             b.bind(on_release=lambda w, v=val: self.classified(pop, text, v, back))
             box.add_widget(b)
         self._back_button(box, pop, back)
@@ -1091,27 +1313,27 @@ class SoloSystemApp(App):
 
     def ask_category(self, text, callback, back=None, prompt=""):
         box = BoxLayout(orientation="vertical", spacing=dp(6), padding=dp(8))
-        box.add_widget(Label(text=(prompt or "Which kind of habit is this?\n[b]%s[/b]" % text), markup=True, color=(0.7, 1, 1, 1)))
-        pop = Popup(title="[ SYSTEM ]", content=box, size_hint=(0.9, 0.7), title_color=(0.25, 0.85, 1, 1),
-                    separator_color=(0.25, 0.85, 1, 1), background_color=(0.02, 0.05, 0.12, 1))
+        box.add_widget(Label(text=(prompt or "Which kind of habit is this?\n[b]%s[/b]" % text), markup=True, color=T["lt"]))
+        pop = Popup(title="[ SYSTEM ]", content=box, size_hint=(0.9, 0.7), title_color=T["acc"],
+                    separator_color=T["acc"], background_color=T["pbg"])
         for cat in CATS:
-            b = Button(text=cat.upper(), background_normal="", background_color=(0.05, 0.18, 0.35, 1),
-                       color=(0.6, 0.95, 1, 1), size_hint_y=None, height=dp(48))
+            b = Button(text=cat.upper(), background_normal="", background_color=T["btn"],
+                       color=T["txt"], size_hint_y=None, height=dp(48))
             b.bind(on_release=lambda w, c=cat: (pop.dismiss(), callback(c)))
             box.add_widget(b)
         self._back_button(box, pop, back)
         pop.open()
 
-    def quest_tapped(self, i):
-        q = self.g.d["quests"][i]
+    def quest_tapped(self, i, key="quests"):
+        q = self.g.d[key][i]
         if q.get("target", 1) > 1 and q.get("progress", 0) < q["target"]:
-            self.ask_amount(i)
+            self.ask_amount(i, key)
         else:  # a plain quest: ask first, in case it was an accidental tap
             self.dialog("[ QUEST ]", "Did you really finish\n[b]%s[/b] ?" % q["name"],
-                        [("YES, I FINISHED IT", lambda v: self.finish_quest(i)), ("BACK", lambda v: None)], size=(0.9, 0.4))
+                        [("YES, I FINISHED IT", lambda v: self.finish_quest(i, key)), ("BACK", lambda v: None)], size=(0.9, 0.4))
 
-    def confirm_progress(self, i, amount, whole=False):
-        q = self.g.d["quests"][i]
+    def confirm_progress(self, i, amount, whole=False, key="quests"):
+        q = self.g.d[key][i]
         unit = q.get("unit", "")
         left = q.get("target", 1) - q.get("progress", 0)
         if whole:
@@ -1120,27 +1342,27 @@ class SoloSystemApp(App):
             text = "Add [b]%g %s[/b] to [b]%s[/b] ?" % (amount, unit, q["name"])
             if amount >= left:
                 text += "\nThis finishes the quest."
-        self.dialog("[ QUEST ]", text, [("YES, I DID IT", lambda v: self.apply_progress(i, amount)),
-                                         ("BACK", lambda v: self.ask_amount(i))], size=(0.9, 0.45))
+        self.dialog("[ QUEST ]", text, [("YES, I DID IT", lambda v: self.apply_progress(i, amount, key)),
+                                         ("BACK", lambda v: self.ask_amount(i, key))], size=(0.9, 0.45))
 
     def confirm_punishment(self, i):
         p = self.g.d["punishments"][i]
         self.dialog("[ PENALTY ZONE ]", "Did you really complete this penalty?\n[b]%s[/b]" % p,
                     [("YES, DONE", lambda v: self.finish_punishment(i)), ("BACK", lambda v: None)], size=(0.9, 0.4))
 
-    def ask_amount(self, i):
-        q = self.g.d["quests"][i]
+    def ask_amount(self, i, key="quests"):
+        q = self.g.d[key][i]
         target, done = q.get("target", 1), q.get("progress", 0)
         box = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
         box.add_widget(Label(text="[b]%s[/b]\n%g / %g %s done" % (q["name"], done, target, q.get("unit", "")),
-                             markup=True, color=(0.7, 1, 1, 1)))
+                             markup=True, color=T["lt"]))
         inp = TextInput(hint_text="Amount to add (e.g. 20)", input_filter="float", multiline=False,
-                        size_hint_y=None, height=dp(44), background_color=(0.02, 0.05, 0.12, 1),
-                        foreground_color=(0.7, 1, 1, 1), cursor_color=(0.3, 0.9, 1, 1))
+                        size_hint_y=None, height=dp(44), background_color=T["pbg"],
+                        foreground_color=T["lt"], cursor_color=(0.3, 0.9, 1, 1))
         box.add_widget(inp)
         row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
-        pop = Popup(title="[ ADD PROGRESS ]", content=box, size_hint=(0.9, 0.5), title_color=(0.25, 0.85, 1, 1),
-                    separator_color=(0.25, 0.85, 1, 1), background_color=(0.02, 0.05, 0.12, 1))
+        pop = Popup(title="[ ADD PROGRESS ]", content=box, size_hint=(0.9, 0.5), title_color=T["acc"],
+                    separator_color=T["acc"], background_color=T["pbg"])
 
         def add(*a):
             try:
@@ -1148,29 +1370,32 @@ class SoloSystemApp(App):
             except ValueError:
                 return
             pop.dismiss()
-            self.confirm_progress(i, n)
+            self.confirm_progress(i, n, key=key)
 
         def full(*a):
             pop.dismiss()
-            self.confirm_progress(i, target - done, whole=True)
+            self.confirm_progress(i, target - done, whole=True, key=key)
         for text, cb in (("ADD", add), ("COMPLETE ALL", full)):
-            b = Button(text=text, background_normal="", background_color=(0.05, 0.18, 0.35, 1), color=(0.6, 0.95, 1, 1))
+            b = Button(text=text, background_normal="", background_color=T["btn"], color=T["txt"])
             b.bind(on_release=cb)
             row.add_widget(b)
         inp.bind(on_text_validate=add)
         box.add_widget(row)
         pop.open()
 
-    def apply_progress(self, i, amount):
-        msgs = self.g.add_progress(i, amount)
+    def apply_progress(self, i, amount, key="quests"):
+        msgs = self.g.add_progress(i, amount, key)
         self.refresh()
         if msgs:
+            if any("Quest complete" in m for m in msgs):
+                self.play("quest")
             self.popup("[ QUEST ]", "\n".join(msgs))
 
-    def finish_quest(self, i):
-        msgs = self.g.complete_quest(i)
+    def finish_quest(self, i, key="quests"):
+        msgs = self.g.complete_quest(i, key)
         self.refresh()
         if msgs:
+            self.play("quest")
             self.popup("[ QUEST ]", "\n".join(msgs))
 
     def finish_punishment(self, i):
@@ -1182,26 +1407,26 @@ class SoloSystemApp(App):
                text_in="", readonly=False):
         """Popup with optional text box. Each button callback gets the typed text; return False to keep it open."""
         box = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
-        box.add_widget(Label(text=text, markup=True, color=(0.7, 1, 1, 1), halign="center"))
+        box.add_widget(Label(text=text, markup=True, color=T["lt"], halign="center"))
         inp = None
         if hint is not None:
             inp = TextInput(hint_text=hint, text=text_in, readonly=readonly, multiline=multiline, size_hint_y=None,
                             height=height,
-                            background_color=(0.02, 0.05, 0.12, 1), foreground_color=(0.7, 1, 1, 1),
+                            background_color=T["pbg"], foreground_color=T["lt"],
                             cursor_color=(0.3, 0.9, 1, 1))
             box.add_widget(inp)
-        pop = Popup(title=title, content=box, size_hint=size, title_color=(0.25, 0.85, 1, 1),
-                    separator_color=(0.25, 0.85, 1, 1), background_color=(0.02, 0.05, 0.12, 1))
+        pop = Popup(title=title, content=box, size_hint=size, title_color=T["acc"],
+                    separator_color=T["acc"], background_color=T["pbg"])
 
         def press(w, cb):
             if cb(inp.text if inp is not None else "") is not False:
                 pop.dismiss()
         for label, cb in buttons:
             b = Button(text=label, size_hint_y=None, height=dp(48), background_normal="",
-                       background_color=(0.05, 0.18, 0.35, 1), color=(0.6, 0.95, 1, 1))
+                       background_color=T["btn"], color=T["txt"])
             b.bind(on_release=lambda w, cb=cb: press(w, cb))
             box.add_widget(b)
-        pop.open()
+        self.fade_in(pop)
 
     def ask_reminder(self, text, back=None, prefill="", level="mid"):
         def save(v, tomorrow):
@@ -1237,9 +1462,10 @@ class SoloSystemApp(App):
     def header(self, text):
         return Label(text="[b]%s[/b]" % text, markup=True, size_hint_y=None, height=dp(30), color=(1, 0.85, 0.3, 1))
 
-    def task_row(self, text, on_tap, on_del, disabled=False, color=(0.05, 0.18, 0.35, 1), extra=None):
+    def task_row(self, text, on_tap, on_del, disabled=False, color=None, extra=None):
+        color = color or T["btn"]
         row = BoxLayout(size_hint_y=None, height=dp(62), spacing=dp(4))
-        main = Button(text=text, background_normal="", background_color=color, color=(0.6, 0.95, 1, 1),
+        main = Button(text=text, background_normal="", background_color=color, color=T["txt"],
                       disabled=disabled, halign="center")
         main.bind(width=lambda w, v: setattr(w, "text_size", (v - 16, None)))
         main.bind(on_release=lambda w: on_tap())
@@ -1249,7 +1475,7 @@ class SoloSystemApp(App):
         row.add_widget(main)
         if extra:
             ex = Button(text=extra[0], size_hint_x=None, width=dp(66), background_normal="",
-                        background_color=(0.1, 0.3, 0.5, 1), color=(0.6, 0.95, 1, 1))
+                        background_color=(0.1, 0.3, 0.5, 1), color=T["txt"])
             ex.bind(on_release=lambda w: extra[1]())
             row.add_widget(ex)
         row.add_widget(x)
@@ -1265,6 +1491,9 @@ class SoloSystemApp(App):
             ("OPEN ROUTINE\n%d left today (of %d)" % (left, len(d["routines"])), lambda w: self.open_page("routine")),
             ("OPEN TO-DO LIST\n%d open (%d hard)" % (len(d["todos"]), hard), lambda w: self.open_page("todo")),
             ("OPEN MASTERY\n%d skills" % len(d["mastery"]), lambda w: self.open_page("mastery")),
+            ("OPEN FOCUS TIMER\n%s" % ("session running" if d.get("focus") else "%d min focused today" % d["history"].get(today_str(), {}).get("focus", 0)),
+             lambda w: self.open_page("focus")),
+            ("OPEN FLEX QUESTS\nrest days, weekly and emergency quests", lambda w: self.open_page("flex")),
             ("OPEN QUIT TRACKER\n%d targets" % len(d["quits"]), lambda w: self.open_page("quit")),
             ("OPEN JOURNAL BOOK\n%d entries" % len(d["journal"]), lambda w: self.open_journal()),
             ("OPEN TOMORROW PLANNER\n%d planned for tomorrow" % len(self.g.plans_for(tomorrow_str())), lambda w: self.open_planner()),
@@ -1280,12 +1509,13 @@ class SoloSystemApp(App):
         self.go("page")
 
     def page_add(self):
-        {"routine": self.add_routine_dialog, "todo": self.add_todo_dialog,
-         "quit": self.add_quit_dialog, "mastery": self.add_mastery_dialog}[self.page_kind]()
+        {"routine": self.add_routine_dialog, "todo": self.add_todo_dialog, "quit": self.add_quit_dialog,
+         "mastery": self.add_mastery_dialog, "focus": lambda: self.focus_duration(None), "flex": self.add_weekly_dialog}[self.page_kind]()
 
     def build_page(self):
         names = {"routine": ("[ ROUTINE ]", "+ ADD ROUTINE"), "todo": ("[ TO-DO LIST ]", "+ ADD TO-DO"),
-                 "quit": ("[ QUIT TRACKER ]", "+ ADD SOMETHING TO QUIT"), "mastery": ("[ MASTERY ]", "+ ADD A SKILL TO MASTER")}
+                 "quit": ("[ QUIT TRACKER ]", "+ ADD SOMETHING TO QUIT"), "mastery": ("[ MASTERY ]", "+ ADD A SKILL TO MASTER"),
+                 "focus": ("[ FOCUS TIMER ]", "+ JUST FOCUS (no target)"), "flex": ("[ FLEX QUESTS ]", "+ ADD A WEEKLY QUEST")}
         self.page_title, self.page_add_text = names[self.page_kind]
         box = self.screen("page").ids.page_box
         box.clear_widgets()
@@ -1297,7 +1527,7 @@ class SoloSystemApp(App):
             done = self.g.routine_done_today(r)
             box.add_widget(self.task_row(("[X]  " if done else "[  ]  ") + r["text"], lambda r=r: self.tap_routine(r),
                                          lambda r=r: (self.g.remove_routine(r["id"]), self.refresh()),
-                                         disabled=done, color=(0.05, 0.3, 0.2, 1) if done else (0.05, 0.18, 0.35, 1)))
+                                         disabled=done, color=(0.05, 0.3, 0.2, 1) if done else T["btn"]))
 
     def page_todo(self, box):
         box.add_widget(self.header("Hard tasks first"))
@@ -1334,6 +1564,152 @@ class SoloSystemApp(App):
                                           color=(0.05, 0.3, 0.2, 1) if m["met"] else (0.15, 0.15, 0.4, 1)))
             cell.add_widget(Bar(value=m["percent"] / 100.0, size_hint_y=None, height=dp(18)))
             box.add_widget(cell)
+
+    # ---------- focus timer ----------
+    def page_focus(self, box):
+        f = self.g.d.get("focus")
+        mins = self.g.d["history"].get(today_str(), {}).get("focus", 0)
+        box.add_widget(self.header("Focus today: %d min     Total: %d min" % (mins, self.g.d["counts"].get("focus_min", 0))))
+        if f:
+            left = int(max(0, f["end"] - time.time()))
+            box.add_widget(self.mkbtn("SESSION RUNNING: %s\n%02d:%02d left - tap to open the timer" % (f.get("label") or "Focus", left // 60, left % 60),
+                                      lambda w: self.open_focus_timer(), color=(0.05, 0.3, 0.2, 1)))
+            return
+        box.add_widget(self.header("Tap what you are focusing on"))
+        for m in self.g.d["mastery"]:
+            box.add_widget(self.mkbtn("MASTERY: %s\nthe minutes go to your mastery" % m["name"],
+                                      lambda w, m=m: self.focus_duration(("mastery", m["id"], m["name"]))))
+        for q in self.g.d["quests"]:
+            if not q["done"] and q.get("unit") == "minutes" and q.get("target", 1) > 1:
+                box.add_widget(self.mkbtn("QUEST: %s\n%g / %g minutes" % (q["name"], q.get("progress", 0), q["target"]),
+                                          lambda w, q=q: self.focus_duration(("quest", q["name"], q["name"]))))
+
+    def focus_duration(self, target):
+        kind, ref, label = target or ("none", None, "")
+
+        def go(mins):
+            self.g.start_focus(mins, kind, ref, label)
+            self.refresh()
+            self.open_focus_timer()
+
+        def typed(v):
+            try:
+                n = int(float(v))
+            except ValueError:
+                return False
+            if not 1 <= n <= 240:
+                return False
+            go(n)
+        self.dialog("[ FOCUS TIMER ]", "How long?\n%s" % (("[b]%s[/b]" % label) if label else "No target - just focus time"),
+                    [("25 MIN", lambda v: go(25)), ("45 MIN", lambda v: go(45)), ("60 MIN", lambda v: go(60)),
+                     ("START TYPED MINUTES", typed), ("BACK", lambda v: None)], hint="minutes (1-240)", size=(0.92, 0.78))
+
+    def open_focus_timer(self):
+        if not self.g.d.get("focus"):
+            return
+        box = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
+        self.focus_label = Label(text="", font_size="34sp", halign="center", color=T["lt"])
+        box.add_widget(self.focus_label)
+        for text, cb in (("FINISH EARLY (keep the time so far)", self.focus_complete), ("CANCEL (discard)", self.focus_cancel), ("HIDE (keeps running)", self.focus_hide)):
+            b = Button(text=text, size_hint_y=None, height=dp(48), background_normal="", background_color=T["btn"], color=T["txt"])
+            b.bind(on_release=lambda w, cb=cb: cb())
+            box.add_widget(b)
+        self.focus_pop = Popup(title="[ FOCUS ]", content=box, size_hint=(0.92, 0.65), auto_dismiss=False, title_color=T["acc"],
+                               separator_color=T["acc"], background_color=T["pbg"])
+        self.focus_pop.open()
+        Clock.schedule_interval(self.focus_tick, 1)
+        self.focus_tick(0)
+
+    def focus_tick(self, dt):
+        left = self.g.focus_left()
+        if left is None:
+            return False
+        f = self.g.d["focus"]
+        left = int(left)
+        self.focus_label.text = "%02d:%02d\n%s" % (left // 60, left % 60, f.get("label") or "Focus")
+        if left <= 0:
+            self.focus_complete()
+            return False
+
+    def focus_hide(self):
+        Clock.unschedule(self.focus_tick)
+        self.focus_pop.dismiss()
+
+    def focus_cancel(self):
+        Clock.unschedule(self.focus_tick)
+        self.focus_pop.dismiss()
+        self.g.cancel_focus()
+        self.refresh()
+
+    def focus_complete(self):
+        Clock.unschedule(self.focus_tick)
+        try:
+            self.focus_pop.dismiss()
+        except Exception:
+            pass
+        mins, msgs = self.g.finish_focus()
+        self.refresh()
+        if mins:
+            self.play("chime")
+            self.vibrate()
+            self.notify("[SYSTEM] Focus complete", "%d minutes counted." % mins)
+        self.popup("[ FOCUS ]", "\n".join(msgs))
+
+    # ---------- flexible quests ----------
+    def claim_emergency(self):
+        msgs = self.g.finish_emergency()
+        self.refresh()
+        if msgs:
+            self.play("quest")
+            self.popup("[ EMERGENCY QUEST ]", "\n".join(msgs))
+
+    def page_flex(self, box):
+        d = self.g.d
+        box.add_widget(self.header("REST DAYS"))
+        days = ", ".join(DAY_NAMES[i].upper() for i in d["rest_days"]) or "none"
+        box.add_widget(self.mkbtn("Rest days: %s\nno quests, no penalties, streak kept   (tap to change)" % days, lambda w: self.rest_days_dialog()))
+        box.add_widget(self.mkbtn("TAKE A REST DAY NOW\nonce every 7 days, before you start today's quests", lambda w: self.dialog(
+            "[ REST DAY ]", "Skip today's quests?\nYour streak stays safe.", [("YES, REST TODAY", lambda v: self.do_rest_now()), ("BACK", lambda v: None)], size=(0.9, 0.4))))
+        box.add_widget(self.header("EMERGENCY QUESTS"))
+        box.add_widget(self.mkbtn("Surprise quests: %s\nabout one every other day, with a 1 hour limit   (tap to switch)" % ("ON" if d.get("emg_on", True) else "OFF"),
+                                  lambda w: self.toggle_emergency()))
+        box.add_widget(self.header("WEEKLY QUEST TEMPLATES  (Monday to Sunday)"))
+        for t in d["wtemplates"]:
+            box.add_widget(self.task_row("%s\n%g %s a week   (+%d EXP)" % (t["name"], t["target"], t["unit"], t["reward"]), lambda: None,
+                                         lambda t=t: self.dialog("[ WEEKLY QUEST ]", "Delete [b]%s[/b]?" % t["name"],
+                                                                 [("YES, DELETE", lambda v: (self.g.remove_wtemplate(t["name"]), self.refresh())), ("BACK", lambda v: None)], size=(0.9, 0.4))))
+
+    def rest_days_dialog(self):
+        def save(v):
+            self.g.set_rest_days(parse_days(v))
+            self.refresh()
+        self.dialog("[ REST DAYS ]", "Which weekdays are rest days?\nExample:  sat, sun      (empty = none)",
+                    [("SAVE", save), ("BACK", lambda v: None)], hint="sat, sun", text_in=", ".join(DAY_NAMES[i] for i in self.g.d["rest_days"]), size=(0.9, 0.5))
+
+    def do_rest_now(self):
+        msg = self.g.rest_now()
+        self.refresh()
+        self.popup("[ REST DAY ]", msg)
+
+    def toggle_emergency(self):
+        self.g.d["emg_on"] = not self.g.d.get("emg_on", True)
+        self.g.save()
+        self.refresh()
+
+    def add_weekly_dialog(self):
+        def save(v):
+            parts = [p.strip() for p in v.split("|")]
+            try:
+                name, target, unit, reward = parts[0], float(parts[1]), parts[2], int(parts[3])
+                if not name or target < 1 or reward < 1:
+                    raise ValueError
+            except (ValueError, IndexError):
+                self.popup("[ WEEKLY QUEST ]", "Type it like:  Gym visits | 4 | times | 100\n(name | amount for the week | unit | reward EXP)")
+                return False
+            self.ask_category(name, lambda c: (self.g.add_wtemplate(name, target, unit, reward, c), self.refresh()),
+                              back=self.add_weekly_dialog, prompt="What kind of quest is this?\n[b]%s[/b]" % name)
+        self.dialog("[ WEEKLY QUEST ]", "A quest you have a whole week for.\nFormat:  name | amount | unit | reward EXP",
+                    [("NEXT", save), ("BACK", lambda v: None)], hint="Gym visits | 4 | times | 100", size=(0.92, 0.6))
 
     def add_routine_dialog(self):
         self.dialog("[ ROUTINE ]", "Something you do every day.\nIt logs with one tap.",
@@ -1395,7 +1771,7 @@ class SoloSystemApp(App):
         box = self.screen("log").ids.log_box
         box.clear_widgets()
         if not self.g.d["log"]:
-            box.add_widget(Label(text="No habits logged yet.", size_hint_y=None, height=dp(50), color=(0.6, 0.95, 1, 1)))
+            box.add_widget(Label(text="No habits logged yet.", size_hint_y=None, height=dp(50), color=T["txt"]))
         for i, e in enumerate(self.g.d["log"][:60]):
             box.add_widget(self.mkbtn(log_line(e), lambda w, i=i: self.log_entry_menu(i)))
 
@@ -1443,6 +1819,42 @@ class SoloSystemApp(App):
         self.refresh()
         self.popup("[ REWARD ]", msg)
 
+    # ---------- weekly system report ----------
+    def wrapped(self, text, height, color=None):
+        lab = Label(text=text, markup=True, size_hint_y=None, height=height, color=color or T["txt"], halign="center")
+        lab.bind(width=lambda w, v: setattr(w, "text_size", (v - 16, None)))
+        return lab
+
+    def open_report(self):
+        self.g.mark_report_seen()
+        self.build_report()
+        self.go("report")
+
+    def build_report(self):
+        r = self.g.weekly_report()
+        box = self.screen("report").ids.report_box
+        box.clear_widgets()
+        box.add_widget(self.wrapped("[b]HUNTER GRADE[/b]\n[size=56sp][b]%s[/b][/size]" % r["grade"], dp(120), (1, 0.85, 0.3, 1)))
+        box.add_widget(self.wrapped("%s  -  %s" % (r["from"].strftime("%b %d"), r["to"].strftime("%b %d")), dp(26)))
+        change = ""
+        if r["prev_exp"]:
+            change = "   (%+d%% vs last week)" % round((r["exp"] / float(r["prev_exp"]) - 1) * 100)
+        box.add_widget(self.header("THIS WEEK"))
+        box.add_widget(self.wrapped("EXP gained: %d%s\nHabits logged: %d     Quests done: %d\nPerfect days: %d / 7     Active days: %d / 7\nFocus time: %d min" % (
+            r["exp"], change, r["habits"], r["quests"], r["perfect"], r["active"], r["focus"]), dp(112)))
+        a = r["attrs"]
+        box.add_widget(self.header("ATTRIBUTES"))
+        box.add_widget(self.wrapped("Physical +%d     Mental +%d     Spiritual +%d\nStrongest: %s     Needs work: %s" % (
+            a["Physical"], a["Mental"], a["Spiritual"], r["strongest"], r["weakest"]), dp(60)))
+        if r["best_exp"]:
+            box.add_widget(self.header("BEST DAY"))
+            box.add_widget(self.wrapped("%s  -  %d EXP" % (r["best_day"].strftime("%A, %b %d"), r["best_exp"]), dp(30)))
+        box.add_widget(self.header("COACH"))
+        for tip in r["tips"] or ["Keep it up. Nothing to fix this week."]:
+            box.add_widget(self.wrapped(tip, dp(54)))
+        for m in self.g.d["mastery"]:
+            box.add_widget(self.wrapped("Mastery  %s:  %.1f%%  (%s)" % (m["name"], m["percent"], mastery_rank(m["percent"])), dp(30)))
+
     def open_history(self):
         self.build_history()
         self.go("history")
@@ -1452,7 +1864,7 @@ class SoloSystemApp(App):
         box = self.screen("history").ids.hist_box
         box.clear_widgets()
         d, hist, c = self.g.d, self.g.d["history"], self.g.d["counts"]
-        light = (0.6, 0.95, 1, 1)
+        light = T["txt"]
         box.add_widget(Label(text="Habits logged: %d     Quests done: %d\nStreak: %d days (best %d)     Deaths: %d     Rewards claimed: %d" % (
             c["habits"], c["quests"], d["streak"], d["best_streak"], c["deaths"], len(d["redeemed"])),
             size_hint_y=None, height=dp(56), color=light))
@@ -1565,7 +1977,7 @@ class SoloSystemApp(App):
                 box.add_widget(self.task_row(text, lambda p=p: (self.g.toggle_plan(p["id"]), self.refresh()),
                                              lambda p=p: (self.g.remove_plan(p["id"]), self.refresh()),
                                              extra=("TO-DO", lambda p=p: self.new_todo_flow(p["text"], prefill=p["time"])),
-                                             color=(0.05, 0.3, 0.2, 1) if p["done"] else (0.05, 0.18, 0.35, 1)))
+                                             color=(0.05, 0.3, 0.2, 1) if p["done"] else T["btn"]))
 
     def open_journal(self):
         self.refresh()
@@ -1593,7 +2005,7 @@ class SoloSystemApp(App):
         box.clear_widgets()
         entries = sorted(self.g.d["journal"], key=lambda e: e["ts"], reverse=True)
         if not entries:
-            box.add_widget(Label(text="No entries yet.", size_hint_y=None, height=dp(60), color=(0.6, 0.95, 1, 1)))
+            box.add_widget(Label(text="No entries yet.", size_hint_y=None, height=dp(60), color=T["txt"]))
         for e in entries:
             lines = e["text"].strip().splitlines() or [""]
             label = "%s\n%s" % (time.strftime("%b %d, %Y  %H:%M", time.localtime(e["ts"])), lines[0][:60])
@@ -1657,14 +2069,14 @@ class SoloSystemApp(App):
         self.gps_fixes, self.gps_acc, self.gps_status = 0, None, ""
         box = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
         self.run_label = Label(text="0.00 km\n00:00\nGo outside with open sky,\nthen press START", font_size="18sp",
-                               halign="center", color=(0.7, 1, 1, 1))
+                               halign="center", color=T["lt"])
         box.add_widget(self.run_label)
         row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(6))
         self.run_pop = Popup(title="[ RUN TRACKER ]", content=box, size_hint=(0.92, 0.6), auto_dismiss=False,
-                             title_color=(0.25, 0.85, 1, 1), separator_color=(0.25, 0.85, 1, 1),
-                             background_color=(0.02, 0.05, 0.12, 1))
+                             title_color=T["acc"], separator_color=T["acc"],
+                             background_color=T["pbg"])
         for text, cb in (("START", self.start_run), ("FINISH", self.finish_run), ("CANCEL", self.cancel_run)):
-            b = Button(text=text, background_normal="", background_color=(0.05, 0.18, 0.35, 1), color=(0.6, 0.95, 1, 1))
+            b = Button(text=text, background_normal="", background_color=T["btn"], color=T["txt"])
             b.bind(on_release=cb)
             row.add_widget(b)
         box.add_widget(row)
@@ -1847,10 +2259,11 @@ class SoloSystemApp(App):
     def start_camera(self, kind):
         try:
             import camera_pose
-            if reps is None or not camera_pose.available():
-                raise RuntimeError("this build has no camera library")
-        except Exception as e:
-            self.popup("[ CAMERA ]", "The camera counter needs the camera build of the app.\n(%s)" % e)
+        except ImportError:
+            self.popup("[ CAMERA ]", "The camera files are not in this app yet.\nUpload the Build 1.9 files to GitHub, run Build APK with the\n\"camera\" box ticked, and install that APK.")
+            return
+        if reps is None or not camera_pose.available():
+            self.popup("[ CAMERA ]", "This APK has no camera library yet.\nRun Build APK with the \"camera\" box ticked and install it.\n(ADMIN > CAMERA CHECK shows what is missing.)")
             return
         try:
             from android.permissions import request_permissions
@@ -1871,16 +2284,16 @@ class SoloSystemApp(App):
             return
         self.keep_awake(True)
         box = BoxLayout(orientation="vertical", spacing=dp(6), padding=dp(8))
-        self.cam_label = Label(text="Starting...", font_size="20sp", halign="center", color=(0.7, 1, 1, 1))
+        self.cam_label = Label(text="Starting...", font_size="20sp", halign="center", color=T["lt"])
         box.add_widget(self.cam_label)
         self.cam_pop = Popup(title="[ %s ]" % reps.NAMES[kind].upper(), content=box, size_hint=(0.94, 0.7), auto_dismiss=False,
-                             title_color=(0.25, 0.85, 1, 1), separator_color=(0.25, 0.85, 1, 1), background_color=(0.02, 0.05, 0.12, 1))
+                             title_color=T["acc"], separator_color=T["acc"], background_color=T["pbg"])
         for names in ((("-1", lambda w: self.reps.adjust(-1)), ("+1", lambda w: self.reps.adjust(1)),
                        ("FLIP CAMERA", lambda w: self.flip_camera())),
                       (("FINISH", lambda w: self.finish_camera()), ("CANCEL", lambda w: self.stop_camera(True)))):
             row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(6))
             for text, cb in names:
-                b = Button(text=text, background_normal="", background_color=(0.05, 0.18, 0.35, 1), color=(0.6, 0.95, 1, 1))
+                b = Button(text=text, background_normal="", background_color=T["btn"], color=T["txt"])
                 b.bind(on_release=cb)
                 row.add_widget(b)
             box.add_widget(row)
@@ -1934,15 +2347,15 @@ class SoloSystemApp(App):
             return
         box = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
         pin = TextInput(hint_text="Admin PIN", password=True, multiline=False, size_hint_y=None, height=dp(44),
-                        background_color=(0.02, 0.05, 0.12, 1), foreground_color=(0.7, 1, 1, 1),
+                        background_color=T["pbg"], foreground_color=T["lt"],
                         cursor_color=(0.3, 0.9, 1, 1))
         ok = Button(text="UNLOCK", size_hint_y=None, height=dp(44), background_normal="",
-                    background_color=(0.05, 0.18, 0.35, 1), color=(0.6, 0.95, 1, 1))
+                    background_color=T["btn"], color=T["txt"])
         box.add_widget(pin)
         box.add_widget(ok)
         pop = Popup(title="[ ADMIN ACCESS ]", content=box, size_hint=(0.85, 0.35),
-                    title_color=(0.25, 0.85, 1, 1), separator_color=(0.25, 0.85, 1, 1),
-                    background_color=(0.02, 0.05, 0.12, 1))
+                    title_color=T["acc"], separator_color=T["acc"],
+                    background_color=T["pbg"])
 
         def check(*a):
             if pin.text == self.g.d["pin"]:

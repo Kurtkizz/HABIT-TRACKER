@@ -1,9 +1,10 @@
 """Background watcher (Android foreground service). While the app is closed it keeps the
 24-hour quest cycle running and sends [SYSTEM] notifications."""
+import datetime
 import os
 import time
 
-from engine import Game, hours_text
+from engine import Game, hours_text, week_id
 
 POLL = 15  # seconds between checks
 
@@ -35,6 +36,9 @@ def pending_lines(g, now):
     left, todo = g.remaining(), g.unfinished_text()
     if todo and left < 3 * 3600:
         lines.append("%s left. Unfinished: %s" % (hours_text(left), todo))
+    e = g.d.get("emergency")
+    if e:
+        lines.append("EMERGENCY QUEST: %s" % e["name"].replace("EMERGENCY: ", ""))
     late = [t["text"] for t in g.d["todos"] if t.get("due") and t["due"] <= now]
     if late:
         lines.append("Overdue: " + ", ".join(late))
@@ -61,6 +65,16 @@ def step(g, folder, state, notify, now, unlocked):
         notify("[SYSTEM] Warning: %s left" % hours_text(left), "Unfinished: %s" % g.unfinished_text())
     for t in g.due_todos(now):
         notify("[SYSTEM] Reminder", t["text"])
+    for m in g.emergency_tick(now):
+        notify("[SYSTEM] EMERGENCY QUEST" if m.startswith("EMERGENCY QUEST:") else "[SYSTEM] Emergency Failed", m)
+    f = g.d.get("focus")
+    if f and now >= f["end"] and state.get("focus_sent") != f["start"]:
+        state["focus_sent"] = f["start"]
+        notify("[SYSTEM] Focus complete", "%d minutes done. Open the app to claim your time." % f["minutes"])
+    today = datetime.date.today()
+    if g.report_due(today) and time.localtime(now).tm_hour >= 18 and state.get("report_sent") != week_id(today):
+        state["report_sent"] = week_id(today)
+        notify("[SYSTEM] Weekly report", "Your Weekly System Report is ready. Open the app to read it.")
     if unlocked and state.get("was_unlocked") is False:  # the phone was just unlocked
         lines = pending_lines(g, now)
         if lines:

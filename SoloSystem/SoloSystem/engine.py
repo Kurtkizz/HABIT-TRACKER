@@ -18,6 +18,21 @@ def tomorrow_str():
     return (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
 
 
+def week_id(date=None):
+    y, w, _ = (date or datetime.date.today()).isocalendar()
+    return "%d-W%02d" % (y, w)
+
+
+def parse_days(text):
+    """'sat, sun' / 'Saturday sunday' -> [5, 6]"""
+    out = []
+    for word in re.findall(r"[a-zA-Z]+", text or ""):
+        w = word.lower()[:3]
+        if w in DAY_NAMES and DAY_NAMES.index(w) not in out:
+            out.append(DAY_NAMES.index(w))
+    return sorted(out)
+
+
 def parse_plan(text):
     """'7:30 Gym', '6pm Study', '6:15pm Read' -> ('07:30', 'Gym'). No time -> ('', text)."""
     m = re.match(r"^\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*(.+)$", text, re.I)
@@ -100,6 +115,9 @@ TITLES = [
     ("Sage", "Reach 25 Mental points", lambda d: d["attrs"]["Mental"] >= 25),
     ("Spirit Walker", "Reach 25 Spiritual points", lambda d: d["attrs"]["Spiritual"] >= 25),
     ("Master", "Reach 100% in a mastery", lambda d: any(m["percent"] >= 100 for m in d.get("mastery", []))),
+    ("Deep Focus", "Focus for 600 minutes in total", lambda d: d["counts"].get("focus_min", 0) >= 600),
+    ("Quick Reflexes", "Clear 5 Emergency Quests", lambda d: d["counts"].get("emergency", 0) >= 5),
+    ("Weekly Warrior", "Clear 10 weekly quests", lambda d: d["counts"].get("weekly", 0) >= 10),
     ("Balanced Hunter", "Reach 15 points in all three attributes", lambda d: min(d["attrs"].values()) >= 15),
 ]
 
@@ -132,6 +150,28 @@ DEFAULT_QUESTS = [
     {"name": "Gratitude: list 3 things", "reward": 20, "penalty": 10, "punishment": "Penalty Zone: list 6 things tomorrow", "target": 3, "unit": "things", "stat": "Spiritual"},
     {"name": "Journal", "reward": 25, "penalty": 15, "punishment": "Penalty Zone: write two journal entries tomorrow", "target": 1, "unit": "", "stat": "Spiritual"},
 ]
+
+# quests that last a whole week (Monday to Sunday); a "step" grows them every 10 levels like the daily ones
+DEFAULT_WEEKLY = [
+    {"name": "Weekly distance", "reward": 150, "penalty": 60, "punishment": "", "target": 10, "unit": "km", "stat": "Physical", "step": 1},
+    {"name": "Read this week", "reward": 120, "penalty": 50, "punishment": "", "target": 70, "unit": "pages", "stat": "Mental", "step": 10},
+    {"name": "Meditate this week", "reward": 120, "penalty": 50, "punishment": "", "target": 70, "unit": "minutes", "stat": "Spiritual", "step": 10},
+]
+
+# surprise quests with a short time limit (minutes)
+EMERGENCY_POOL = [
+    {"name": "EMERGENCY: 20 push-ups right now", "reward": 50, "penalty": 20, "stat": "Physical", "mins": 60},
+    {"name": "EMERGENCY: 30 squats right now", "reward": 50, "penalty": 20, "stat": "Physical", "mins": 60},
+    {"name": "EMERGENCY: hold a 1-minute plank", "reward": 45, "penalty": 20, "stat": "Physical", "mins": 60},
+    {"name": "EMERGENCY: read 5 pages", "reward": 45, "penalty": 20, "stat": "Mental", "mins": 60},
+    {"name": "EMERGENCY: learn one new thing and write it down", "reward": 45, "penalty": 20, "stat": "Mental", "mins": 60},
+    {"name": "EMERGENCY: 3 minutes of silent breathing", "reward": 45, "penalty": 20, "stat": "Spiritual", "mins": 60},
+    {"name": "EMERGENCY: write down 3 things you are grateful for", "reward": 45, "penalty": 20, "stat": "Spiritual", "mins": 60},
+]
+
+# theme name -> the promotion rank index that unlocks it (0 = E, 1 = D ... 5 = S)
+THEME_RANK = {"System": 0, "Shadow": 1, "Monarch": 5}
+DAY_NAMES = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
 
 def haversine(lat1, lon1, lat2, lon2):
@@ -276,6 +316,9 @@ class Game:
             "rank_cleared": 0, "quests_v2": True, "quests_v3": True, "mastery": [], "scale_quests": True, "history": {}, "rewards": [], "redeemed": [], "quits": [],
             "unseen_arrival": False, "warn": {"cycle": 0, "sent": []},
             "best_streak": 0, "counts": {"habits": 0, "quests": 0, "deaths": 0},
+            "rest_days": [], "rest_cycle": False, "last_rest": "", "wtemplates": [dict(w) for w in DEFAULT_WEEKLY],
+            "wquests": [], "week_id": "", "emg_on": True, "emergency": None, "emg_plan": {}, "focus": None,
+            "last_report": "", "theme": "System", "unlock_themes": False, "sound": True,
         }
 
     def load(self, save=True):
@@ -492,12 +535,15 @@ class Game:
     # ---- daily quests ----
     def new_cycle(self, start):
         self.d["cycle_start"] = start
-        self.d["quests"] = [self.make_quest(q) for q in self.d["templates"]]
-        self.ensure_trial()
+        rest = datetime.date.fromtimestamp(start).weekday() in self.d.get("rest_days", [])
+        self.d["rest_cycle"] = rest
+        self.d["quests"] = [] if rest else [self.make_quest(q) for q in self.d["templates"]]
+        if not rest:
+            self.ensure_trial()
         self.arrived = True
 
-    def complete_quest(self, i):
-        q = self.d["quests"][i]
+    def complete_quest(self, i, key="quests"):
+        q = self.d[key][i]
         if q["done"]:
             return []
         q["done"] = True
@@ -509,6 +555,8 @@ class Game:
             self.d["attrs"][cat] += 2
             msgs.append("%s +2" % cat)
         self.d["counts"]["quests"] += 1
+        if key == "wquests":
+            self.d["counts"]["weekly"] = self.d["counts"].get("weekly", 0) + 1
         self.heal(5)
         self.record(exp=q["reward"], quests=1, attr=cat, pts=2 if cat else 0)
         if q.get("trial"):
@@ -520,14 +568,14 @@ class Game:
         self.save()
         return msgs
 
-    def add_progress(self, i, amount):
-        q = self.d["quests"][i]
+    def add_progress(self, i, amount, key="quests"):
+        q = self.d[key][i]
         if q["done"] or amount <= 0:
             return []
         target = q.get("target", 1)
         q["progress"] = min(target, q.get("progress", 0) + amount)
         if q["progress"] >= target:
-            return self.complete_quest(i)
+            return self.complete_quest(i, key)
         self.save()
         return []
 
@@ -540,11 +588,18 @@ class Game:
         self.save()
 
     def add_run_km(self, km):
-        """Add tracked kilometers to the first open quest measured in km."""
+        """Add tracked kilometers to the first open daily quest and the first open weekly quest measured in km."""
+        is_km = lambda q: not q["done"] and q.get("unit", "").strip().lower() in ("km", "kilometer", "kilometers", "kilometre", "kilometres")
+        res = (None, [])
         for i, q in enumerate(self.d["quests"]):
-            if not q["done"] and q.get("unit", "").strip().lower() in ("km", "kilometer", "kilometers", "kilometre", "kilometres"):
-                return i, self.add_progress(i, round(km, 3))
-        return None, []
+            if is_km(q):
+                res = (i, self.add_progress(i, round(km, 3)))
+                break
+        for j, w in enumerate(self.d.get("wquests", [])):
+            if is_km(w):
+                res = (res[0], res[1] + ["Weekly quest %s: +%.2f km" % (w["name"], km)] + self.add_progress(j, round(km, 3), "wquests"))
+                break
+        return res
 
     # ---- warnings / summaries ----
     def warning_due(self, now=None):
@@ -755,6 +810,197 @@ class Game:
     def carried_plans(self):
         return [p for p in self.d["plans"] if p["date"] < today_str() and not p["done"]]
 
+    # ---- weekly quests ----
+    def sync_week(self):
+        """A new ISO week: settle last week's quests and issue this week's. Returns messages."""
+        wid = week_id()
+        if self.d.get("week_id") == wid and self.d.get("wquests"):
+            return []
+        msgs = []
+        for q in self.d.get("wquests", []):
+            if not q["done"]:
+                tgt = q.get("target", 1)
+                frac = min(1.0, q.get("progress", 0) / float(tgt)) if tgt else 0.0
+                pen = int(round(q["penalty"] * (1 - frac)))
+                self.lose_exp(pen)
+                msgs.append("WEEKLY QUEST NOT FINISHED: %s  -%d EXP (you got %d%%)" % (q["name"], pen, frac * 100))
+        self.d["wquests"] = [self.make_quest(t) for t in self.d.get("wtemplates", [])]
+        self.d["week_id"] = wid
+        self.save()
+        return msgs
+
+    def add_wtemplate(self, name, target, unit, reward, category=""):
+        self.d["wtemplates"].append({"name": name.strip(), "reward": int(reward), "penalty": max(10, int(reward) // 3), "punishment": "",
+                                     "target": max(1.0, float(target)), "unit": unit.strip(), "stat": norm_cat(category) or guess_cat(name), "step": 0})
+        self.d["wquests"].append(self.make_quest(self.d["wtemplates"][-1]))
+        self.save()
+
+    def remove_wtemplate(self, name):
+        self.d["wtemplates"] = [t for t in self.d["wtemplates"] if t["name"] != name]
+        self.d["wquests"] = [q for q in self.d["wquests"] if q["name"] != name]
+        self.save()
+
+    # ---- rest days ----
+    def set_rest_days(self, days):
+        self.d["rest_days"] = sorted(set(days))
+        self.save()
+
+    def rest_now(self):
+        if self.d.get("rest_cycle"):
+            return "Today is already a rest day."
+        last = self.d.get("last_rest", "")
+        if last and (datetime.date.today() - datetime.date.fromisoformat(last)).days < 7:
+            return "You already took a rest day in the last 7 days."
+        if any(q["done"] or q.get("progress", 0) > 0 for q in self.d["quests"]):
+            return "You already started today's quests. A rest day has to be taken before you start."
+        self.d["quests"], self.d["rest_cycle"], self.d["last_rest"] = [], True, today_str()
+        self.save()
+        return "Rest day taken. No quests until the next cycle, and your streak is safe."
+
+    # ---- emergency quests ----
+    def emergency_tick(self, now=None, rng=None):
+        """Plans at most one surprise quest per day, issues it at its time and settles expired ones. Returns messages."""
+        import random
+        rng = rng or random
+        now = time.time() if now is None else now
+        msgs, changed = [], False
+        e = self.d.get("emergency")
+        if e and now >= e["expires"]:
+            self.lose_exp(e["penalty"])
+            msgs += self.lose_hp(e["penalty"] // 4)
+            msgs.append("EMERGENCY QUEST FAILED: %s  -%d EXP" % (e["name"], e["penalty"]))
+            self.d["emergency"], changed = None, True
+        today, plan = today_str(), self.d.get("emg_plan") or {}
+        if plan.get("date") != today:
+            at, nowdt = None, datetime.datetime.fromtimestamp(now)
+            lo = max(now + 60, nowdt.replace(hour=9, minute=0, second=0, microsecond=0).timestamp())
+            hi = nowdt.replace(hour=19, minute=0, second=0, microsecond=0).timestamp()
+            if self.d.get("emg_on", True) and not self.d.get("rest_cycle") and lo < hi and rng.random() < 0.5:
+                at = rng.uniform(lo, hi)
+            plan = self.d["emg_plan"] = {"date": today, "at": at, "issued": False}
+            changed = True
+        if plan.get("at") and not plan["issued"] and now >= plan["at"]:
+            plan["issued"], changed = True, True
+            if self.d.get("emg_on", True) and now - plan["at"] < 3 * 3600 and not self.d.get("emergency"):
+                pick = rng.choice(EMERGENCY_POOL)
+                self.d["emergency"] = dict(pick, issued=now, expires=now + pick["mins"] * 60)
+                msgs.append("EMERGENCY QUEST: %s\nWithin %d minutes: +%d EXP.  Fail: -%d EXP." % (pick["name"], pick["mins"], pick["reward"], pick["penalty"]))
+        if changed:
+            self.save()
+        return msgs
+
+    def finish_emergency(self):
+        e = self.d.get("emergency")
+        if not e:
+            return []
+        self.d["emergency"] = None
+        msgs = ["Emergency quest complete: %s  +%d EXP" % (e["name"], e["reward"])] + self.add_exp(e["reward"])
+        self.d["gold"] += e["reward"] // 2
+        cat = norm_cat(e.get("stat", ""))
+        if cat:
+            self.d["attrs"][cat] += 2
+            msgs.append("%s +2" % cat)
+        self.d["counts"]["emergency"] = self.d["counts"].get("emergency", 0) + 1
+        self.heal(10)
+        self.record(exp=e["reward"], attr=cat, pts=2 if cat else 0)
+        msgs += self.check_titles()
+        self.save()
+        return msgs
+
+    # ---- focus timer ----
+    def start_focus(self, minutes, kind="none", ref=None, label=""):
+        now = time.time()
+        self.d["focus"] = {"start": now, "end": now + minutes * 60, "minutes": minutes, "kind": kind, "ref": ref, "label": label}
+        self.save()
+
+    def focus_left(self, now=None):
+        f = self.d.get("focus")
+        return None if not f else max(0, f["end"] - (time.time() if now is None else now))
+
+    def cancel_focus(self):
+        self.d["focus"] = None
+        self.save()
+
+    def finish_focus(self, now=None):
+        """Ends the session (finished or stopped early). Returns (minutes counted, messages)."""
+        f, now = self.d.get("focus"), (time.time() if now is None else now)
+        if not f:
+            return 0, []
+        mins = f["minutes"] if now >= f["end"] else int((now - f["start"]) / 60.0)
+        self.d["focus"] = None
+        if mins < 1:
+            self.save()
+            return 0, ["Too short to count (under 1 minute)."]
+        gain = mins // 5
+        msgs = ["FOCUS: %d minutes%s" % (mins, ("  +%d EXP" % gain) if gain else "")] + self.add_exp(gain)
+        h = self._day(today_str())
+        h["focus"] = h.get("focus", 0) + mins
+        h["exp"] += gain
+        self.d["counts"]["focus_min"] = self.d["counts"].get("focus_min", 0) + mins
+        if f["kind"] == "mastery":
+            msgs += self.practice(f["ref"], mins)
+        elif f["kind"] == "quest":
+            for i, q in enumerate(self.d["quests"]):
+                if not q["done"] and q["name"] == f["ref"] and q.get("target", 1) > 1:
+                    msgs += self.add_progress(i, mins)
+                    break
+        msgs += self.check_titles()
+        self.save()
+        return mins, msgs
+
+    # ---- weekly system report ----
+    def report_due(self, today=None):
+        today = today or datetime.date.today()
+        return today.weekday() == 6 and self.d.get("last_report") != week_id(today)
+
+    def mark_report_seen(self, today=None):
+        self.d["last_report"] = week_id(today or datetime.date.today())
+        self.save()
+
+    def weekly_report(self, today=None):
+        today = today or datetime.date.today()
+        hist = self.d["history"]
+        day = lambda i: hist.get((today - datetime.timedelta(days=i)).isoformat(), {})
+        this, last = [day(i) for i in range(6, -1, -1)], [day(i) for i in range(13, 6, -1)]
+        exp, prev = sum(h.get("exp", 0) for h in this), sum(h.get("exp", 0) for h in last)
+        attrs = {c: sum(h.get("attrs", {}).get(c, 0) for h in this) for c in CATS}
+        perfect = sum(1 for h in this if h.get("perfect"))
+        active = sum(1 for h in this if h.get("habits") or h.get("quests") or h.get("exp"))
+        focus = sum(h.get("focus", 0) for h in this)
+        best_i = max(range(7), key=lambda k: this[k].get("exp", 0))
+        best_day = today - datetime.timedelta(days=6 - best_i)
+        weakest, strongest = min(CATS, key=lambda c: attrs[c]), max(CATS, key=lambda c: attrs[c])
+        grade = "S" if perfect >= 6 else "A" if perfect >= 4 or active >= 7 else "B" if active >= 5 else "C" if active >= 3 else "D"
+        tips = []
+        ideas = {"Physical": "a workout or a run", "Mental": "reading or studying", "Spiritual": "meditation or a journal entry"}
+        if attrs[weakest] == 0:
+            tips.append("No %s points this week. Try %s." % (weakest, ideas[weakest]))
+        elif attrs[weakest] * 3 < attrs[strongest]:
+            tips.append("%s is lagging behind %s. Give it more time." % (weakest, strongest))
+        if perfect < 3:
+            tips.append("Only %d perfect day(s). Finish every daily quest on more days to build your streak." % perfect)
+        if focus < 60:
+            tips.append("Only %d focus minutes. Use the Focus Timer for deeper work." % focus)
+        if prev and exp < prev * 0.8:
+            tips.append("EXP is down %d%% from last week. Get back to your routine early in the day." % round((1 - exp / float(prev)) * 100))
+        elif prev and exp > prev:
+            tips.append("EXP is up %d%% from last week. Keep going!" % round((exp / float(prev) - 1) * 100))
+        for m in self.d.get("mastery", []):
+            if m["streak"] == 0 and len(tips) < 5:
+                tips.append("Practice %s today to restart its streak." % m["name"])
+        if self.d["streak"] >= 7:
+            tips.append("A %d-day streak. Outstanding." % self.d["streak"])
+        return {"from": today - datetime.timedelta(days=6), "to": today, "exp": exp, "prev_exp": prev, "habits": sum(h.get("habits", 0) for h in this),
+                "quests": sum(h.get("quests", 0) for h in this), "perfect": perfect, "active": active, "focus": focus, "attrs": attrs,
+                "best_day": best_day, "best_exp": this[best_i].get("exp", 0), "weakest": weakest, "strongest": strongest,
+                "grade": grade, "tips": tips[:5]}
+
+    # ---- themes ----
+    def unlocked_themes(self):
+        if self.d.get("unlock_themes"):
+            return list(THEME_RANK)
+        return [n for n, i in THEME_RANK.items() if self.d.get("rank_cleared", 0) >= i]
+
     # ---- planner (not part of the log: no EXP) ----
     def add_plan(self, date, text):
         when, task = parse_plan(text)
@@ -856,9 +1102,14 @@ class Game:
 
     def tick(self):
         """Resolve expired 24h cycles. Returns list of messages."""
-        msgs, now, n = [], time.time(), 0
+        msgs, now, n = self.sync_week(), time.time(), 0
         while now - self.d["cycle_start"] >= DAY and n < 30:
             n += 1
+            if self.d.get("rest_cycle"):  # a rest day: nothing to fail, the streak stays as it is
+                self.heal(30)
+                msgs.append("REST DAY done: streak kept (%d days). +30 HP" % self.d["streak"])
+                self.new_cycle(self.d["cycle_start"] + DAY)
+                continue
             failed = [q for q in self.d["quests"] if not q["done"]]
             cdate = datetime.date.fromtimestamp(self.d["cycle_start"]).isoformat()
             for q in failed:  # the penalty shrinks with how far you got
