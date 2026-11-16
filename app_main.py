@@ -25,7 +25,7 @@ from kivy.uix.popup import Popup
 from kivy.uix.screenmanager import FadeTransition, Screen
 from kivy.uix.textinput import TextInput
 
-from engine import Game, DAY_NAMES, parse_days, week_id, mastery_rank, due_from, hours_text, today_str, tomorrow_str, CATS, norm_cat, SHOP, TITLES, hp_max, rank_for, exp_needed, log_line, days_text, habits_to_text, text_to_habits, quests_to_text, text_to_quests
+from engine import Game, attr_tier, tier_points, DAY_NAMES, parse_days, week_id, mastery_rank, due_from, hours_text, today_str, tomorrow_str, CATS, norm_cat, SHOP, TITLES, hp_max, rank_for, exp_needed, log_line, days_text, habits_to_text, text_to_habits, quests_to_text, text_to_quests
 
 import loader
 import updater
@@ -507,7 +507,7 @@ KV = """
                 size_hint_y: None
                 height: dp(260)
             L:
-                text: 'Daily quests  (name | reward | penalty | punishment | target | unit | category | growth per 10 levels)'
+                text: 'Daily quests  (name | reward | penalty | punishment | target | unit | category | growth per attribute tier)'
                 text_size: self.width, None
                 halign: 'left'
                 valign: 'middle'
@@ -1064,9 +1064,10 @@ class SoloSystemApp(App):
         tot = sum(a.values()) or 1
         cols = {"Physical": "ff6b6b", "Mental": "6bb6ff", "Spiritual": "c08bff"}
         self.stats_text = "\n\n".join(
-            "[color=%s]%s Attributes[/color]\n[size=28sp][b]%d[/b][/size]   (%d%%)" % (cols[k], k, a[k], round(a[k] * 100.0 / tot))
+            "[color=%s]%s Attributes[/color]\n[size=28sp][b]%d[/b][/size]   (%d%%)\n[size=12sp]quest level %d   -   next growth at %d[/size]" % (
+                cols[k], k, a[k], round(a[k] * 100.0 / tot), attr_tier(a[k]), tier_points(attr_tier(a[k]) + 1))
             for k in CATS)
-        self.extra_text = "Streak: %d days   |   Pending punishments: %d\nBuild 2.0 (%s)" % (d["streak"], len(d["punishments"]), updater.code_label())
+        self.extra_text = "Streak: %d days   |   Pending punishments: %d\nBuild 2.1 (%s)" % (d["streak"], len(d["punishments"]), updater.code_label())
         self.log_text = ""
         self.build_quests()
         self.build_shop()
@@ -1944,7 +1945,7 @@ class SoloSystemApp(App):
     def toggle_scaling(self):
         self.g.d["scale_quests"] = not self.g.d.get("scale_quests", True)
         self.g.save()
-        self.popup("[ ADMIN ]", "Quest growth every 10 levels is now %s.\n(Applies to quests issued from the next day.)" %
+        self.popup("[ ADMIN ]", "Quest growth with your attributes is now %s.\n(Applies to quests issued from the next day.)" %
                    ("ON" if self.g.d["scale_quests"] else "OFF"))
 
     def open_planner(self):
