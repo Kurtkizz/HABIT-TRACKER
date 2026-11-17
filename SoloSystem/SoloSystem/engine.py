@@ -143,10 +143,10 @@ DEFAULT_QUESTS = [
     {"name": "Sit-ups", "reward": 40, "penalty": 30, "punishment": "Penalty Zone: 25 extra sit-ups", "target": 50, "step": 5, "unit": "reps", "stat": "Physical"},
     {"name": "Squats", "reward": 40, "penalty": 30, "punishment": "Penalty Zone: 25 extra squats", "target": 50, "step": 5, "unit": "reps", "stat": "Physical"},
     {"name": "Run", "reward": 60, "penalty": 40, "punishment": "Penalty Zone: run 1 km extra", "target": 3, "step": 0.5, "unit": "km", "stat": "Physical"},
-    {"name": "Read", "reward": 30, "penalty": 20, "punishment": "Penalty Zone: read 5 extra pages tomorrow", "target": 10, "unit": "pages", "stat": "Mental"},
-    {"name": "Study", "reward": 35, "penalty": 25, "punishment": "Penalty Zone: 15 extra minutes of study tomorrow", "target": 30, "unit": "minutes", "stat": "Mental"},
+    {"name": "Read", "reward": 30, "penalty": 20, "punishment": "Penalty Zone: read 5 extra pages tomorrow", "target": 10, "step": 2, "unit": "pages", "stat": "Mental"},
+    {"name": "Study", "reward": 35, "penalty": 25, "punishment": "Penalty Zone: 15 extra minutes of study tomorrow", "target": 30, "step": 5, "unit": "minutes", "stat": "Mental"},
     {"name": "Write a page", "reward": 25, "penalty": 15, "punishment": "Penalty Zone: write two pages tomorrow", "target": 1, "unit": "", "stat": "Mental"},
-    {"name": "Meditate", "reward": 30, "penalty": 20, "punishment": "Penalty Zone: 10 extra minutes of silence tomorrow", "target": 10, "unit": "minutes", "stat": "Spiritual"},
+    {"name": "Meditate", "reward": 30, "penalty": 20, "punishment": "Penalty Zone: 10 extra minutes of silence tomorrow", "target": 10, "step": 2, "unit": "minutes", "stat": "Spiritual"},
     {"name": "Gratitude: list 3 things", "reward": 20, "penalty": 10, "punishment": "Penalty Zone: list 6 things tomorrow", "target": 3, "unit": "things", "stat": "Spiritual"},
     {"name": "Journal", "reward": 25, "penalty": 15, "punishment": "Penalty Zone: write two journal entries tomorrow", "target": 1, "unit": "", "stat": "Spiritual"},
 ]
@@ -218,6 +218,21 @@ def rank_for(level):
         if level >= lv:
             r = name
     return r
+
+
+TIER_BASE = 50  # attribute points needed for the first quest growth; every next tier needs one more step than the last
+
+
+def tier_points(n):
+    """Attribute points needed to reach tier n: 50, 150, 300, 500, 750, 1050, 1400 ..."""
+    return TIER_BASE * n * (n + 1) // 2
+
+
+def attr_tier(points):
+    n = 0
+    while tier_points(n + 1) <= points:
+        n += 1
+    return n
 
 
 def rank_index(level):
@@ -313,7 +328,7 @@ class Game:
             "cycle_start": time.time(), "quests": [], "punishments": [], "log": [],
             "hp": hp_max(1), "gold": 0, "title": "Weakest Hunter", "titles": ["Weakest Hunter"],
             "routines": [], "todos": [], "next_id": 1, "journal": [], "plans": [],
-            "rank_cleared": 0, "quests_v2": True, "quests_v3": True, "mastery": [], "scale_quests": True, "history": {}, "rewards": [], "redeemed": [], "quits": [],
+            "rank_cleared": 0, "quests_v2": True, "quests_v3": True, "quests_v4": True, "mastery": [], "scale_quests": True, "history": {}, "rewards": [], "redeemed": [], "quits": [],
             "unseen_arrival": False, "warn": {"cycle": 0, "sent": []},
             "best_streak": 0, "counts": {"habits": 0, "quests": 0, "deaths": 0},
             "rest_days": [], "rest_cycle": False, "last_rest": "", "wtemplates": [dict(w) for w in DEFAULT_WEEKLY],
@@ -347,6 +362,7 @@ class Game:
                         self.d["quests"].append(self.make_quest(q))
             self.d["quests_v2"] = True
         needs_v3 = not self.d.get("quests_v3")  # (checked before the defaults below fill the key in)
+        needs_v4 = not self.d.get("quests_v4")
         for k, v in base.items():
             self.d.setdefault(k, v)
         if not self.d["quests"]:
@@ -366,6 +382,19 @@ class Game:
                             q["target"] = self.make_quest(src)["target"]
                             q["progress"] = min(q.get("progress", 0), q["target"])
             self.d["quests_v3"] = True
+        if needs_v4:  # one-time: Mental / Spiritual quests grow too, and growth follows the attributes
+            steps = {"read": 2, "study": 5, "meditate": 2}
+            for t in self.d.get("templates", []):
+                if t["name"].lower() in steps and t.get("unit", "").lower() in ("pages", "minutes") and not t.get("step"):
+                    t["step"] = steps[t["name"].lower()]
+            by_name = {t["name"]: t for t in self.d.get("templates", [])}
+            for q in self.d.get("quests", []):
+                t = by_name.get(q["name"])
+                if t and not q["done"] and not q.get("trial"):
+                    q["step"] = t.get("step", 0)
+                    q["target"] = self.make_quest(t)["target"]
+                    q["progress"] = min(q.get("progress", 0), q["target"])
+            self.d["quests_v4"] = True
         if save:
             self.save()
 
@@ -471,10 +500,11 @@ class Game:
         return True
 
     def make_quest(self, t):
-        """Today's copy of a quest template. A quest with a "step" grows by that much every 10 levels."""
+        """Today's copy of a quest template. A quest with a "step" grows by that much for every tier of its own attribute."""
         q = dict(t, done=False, progress=0)
         if self.d.get("scale_quests", True) and q.get("step") and q.get("target", 1) > 1:
-            q["target"] = q["target"] + q["step"] * (self.d["level"] // 10)
+            cat = norm_cat(q.get("stat", ""))
+            q["target"] = q["target"] + q["step"] * (attr_tier(self.d["attrs"].get(cat, 0)) if cat else 0)
         return q
 
     def set_level(self, level):

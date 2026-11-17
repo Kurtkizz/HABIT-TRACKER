@@ -19,6 +19,21 @@ def available():
         return False
 
 
+def diagnose():
+    """Plain-English lines for ADMIN > CAMERA CHECK."""
+    lines = ["camera_pose.py: found"]
+    try:
+        from jnius import autoclass
+    except Exception:
+        return lines + ["Android bridge: not available (are you on a computer?)"]
+    lines.append("ML Kit pose library: " + ("found" if available() else "MISSING - build the APK with the camera option"))
+    try:
+        lines.append("Cameras on this phone: %d" % autoclass("android.hardware.Camera").getNumberOfCameras())
+    except Exception as e:
+        lines.append("Camera access error: %s" % e)
+    return lines
+
+
 def _listener_classes():
     from jnius import PythonJavaClass, java_method
 
@@ -76,19 +91,34 @@ class PoseCamera:
         self.error = ""
 
     def start(self):
-        from jnius import autoclass, cast
-        Camera = autoclass("android.hardware.Camera")
-        info = Camera.CameraInfo()
-        want = Camera.CameraInfo.CAMERA_FACING_FRONT if self.front else Camera.CameraInfo.CAMERA_FACING_BACK
-        cam_id = 0
-        for i in range(Camera.getNumberOfCameras()):
-            Camera.getCameraInfo(i, info)
-            if info.facing == want:
-                cam_id = i
-                break
-        Camera.getCameraInfo(cam_id, info)
-        self.rotation = info.orientation  # the app is portrait only
-        self.cam = Camera.open(cam_id)
+        """Raises RuntimeError('<step>: <error>') so the screen can say which step failed."""
+        step = "loading Java classes"
+        try:
+            from jnius import autoclass, cast
+            Camera = autoclass("android.hardware.Camera")
+            CameraInfo = autoclass("android.hardware.Camera$CameraInfo")
+            step = "finding the camera"
+            info = CameraInfo()
+            want = CameraInfo.CAMERA_FACING_FRONT if self.front else CameraInfo.CAMERA_FACING_BACK
+            cam_id = 0
+            for i in range(Camera.getNumberOfCameras()):
+                Camera.getCameraInfo(i, info)
+                if info.facing == want:
+                    cam_id = i
+                    break
+            Camera.getCameraInfo(cam_id, info)
+            self.rotation = info.orientation  # the app is portrait only
+            step = "opening the camera"
+            self.cam = Camera.open(cam_id)
+            step = "setting up the camera"
+            self._setup(autoclass, cast)
+            step = "starting the preview"
+            self.cam.startPreview()
+        except Exception as e:
+            self.stop()
+            raise RuntimeError("%s: %s" % (step, e))
+
+    def _setup(self, autoclass, cast):
         params = self.cam.getParameters()
         sizes = params.getSupportedPreviewSizes()
         best, best_diff = None, None
@@ -111,7 +141,6 @@ class PoseCamera:
         self._texture = autoclass("android.graphics.SurfaceTexture")(10)
         self.cam.setPreviewTexture(self._texture)
         self.cam.setPreviewCallback(self._preview)
-        self.cam.startPreview()
 
     def _on_frame(self, data):
         now = time.time()

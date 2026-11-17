@@ -5,6 +5,7 @@ import shutil
 import ssl
 import sys
 import time
+import urllib.error
 import urllib.request
 
 import loader
@@ -31,12 +32,24 @@ def current_source(name):
     return ""
 
 
+REQUIRED = ("app_main.py", "engine.py", "service_main.py")  # the other files are optional extras
+
+
 def check():
-    """Returns (message, changed). Raises on network problems."""
+    """Returns (message, changed). Raises RuntimeError that names the file that failed."""
     new = {}
     for name in loader.UPDATE_FILES:
-        src = fetch(name)
-        compile(src, name, "exec")  # reject files with syntax errors
+        try:
+            src = fetch(name)
+            compile(src, name, "exec")  # reject files with syntax errors
+        except urllib.error.HTTPError as e:
+            if e.code == 404 and name not in REQUIRED:
+                continue  # an optional file that is not in the repo: keep the one inside the app
+            raise RuntimeError("%s: GitHub answered HTTP %d%s" % (name, e.code, " (file missing, or the repo is private)" if e.code == 404 else ""))
+        except SyntaxError as e:
+            raise RuntimeError("%s has a typo on line %s, so it was not installed" % (name, e.lineno))
+        except Exception as e:
+            raise RuntimeError("%s: %s" % (name, e))
         new[name] = src
     if "def run" not in new["app_main.py"] or "def main" not in new["service_main.py"]:
         raise ValueError("downloaded files look wrong")

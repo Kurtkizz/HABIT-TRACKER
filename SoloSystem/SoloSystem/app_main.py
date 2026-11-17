@@ -1,3 +1,4 @@
+import hashlib
 import math
 import os
 import struct
@@ -25,7 +26,7 @@ from kivy.uix.popup import Popup
 from kivy.uix.screenmanager import FadeTransition, Screen
 from kivy.uix.textinput import TextInput
 
-from engine import Game, DAY_NAMES, parse_days, week_id, mastery_rank, due_from, hours_text, today_str, tomorrow_str, CATS, norm_cat, SHOP, TITLES, hp_max, rank_for, exp_needed, log_line, days_text, habits_to_text, text_to_habits, quests_to_text, text_to_quests
+from engine import Game, attr_tier, tier_points, DAY_NAMES, parse_days, week_id, mastery_rank, due_from, hours_text, today_str, tomorrow_str, CATS, norm_cat, SHOP, TITLES, hp_max, rank_for, exp_needed, log_line, days_text, habits_to_text, text_to_habits, quests_to_text, text_to_quests
 
 import loader
 import updater
@@ -58,6 +59,18 @@ T = {k: tuple(v) for k, v in THEMES["System"].items()}  # the colours the Python
 SFX = {"ding": [(880, .09), (1320, .15)], "quest": [(660, .09), (880, .09), (1320, .22)],
        "level": [(523, .1), (659, .1), (784, .1), (1047, .35)], "bad": [(220, .18), (165, .3)],
        "alarm": [(990, .12), (0, .05), (990, .12), (0, .05), (990, .22)], "chime": [(784, .18), (988, .18), (1175, .4)]}
+
+
+def explain_update_error(e):
+    t = str(e)
+    low = t.lower()
+    if "404" in t:
+        return t + "\nA file is missing from your GitHub repo (or the repo is private).\nUpload every file from the newest zip into SoloSystem/SoloSystem on the main branch."
+    if "certificate" in low or "ssl" in low:
+        return t + "\nThe phone could not verify GitHub's certificate. Check the phone's date and time."
+    if any(w in low for w in ("timed out", "network", "name or service", "unreachable", "urlopen", "temporary failure")):
+        return t + "\nNo internet connection, or GitHub could not be reached."
+    return t
 
 
 def make_wav(path, notes, vol=0.45, rate=22050):
@@ -507,7 +520,7 @@ KV = """
                 size_hint_y: None
                 height: dp(260)
             L:
-                text: 'Daily quests  (name | reward | penalty | punishment | target | unit | category | growth per 10 levels)'
+                text: 'Daily quests  (name | reward | penalty | punishment | target | unit | category | growth per attribute tier)'
                 text_size: self.width, None
                 halign: 'left'
                 valign: 'middle'
@@ -651,6 +664,11 @@ KV = """
                 size_hint_y: None
                 height: dp(48)
                 on_release: app.test_notification()
+            SB:
+                text: 'UPDATE DETAILS'
+                size_hint_y: None
+                height: dp(48)
+                on_release: app.update_details()
             SB:
                 text: 'CHECK FOR UPDATES'
                 size_hint_y: None
@@ -879,7 +897,8 @@ class SoloSystemApp(App):
     def camera_check(self):
         try:
             import camera_pose
-            lines = camera_pose.diagnose()
+            lines = camera_pose.diagnose() if hasattr(camera_pose, "diagnose") else [
+                "camera_pose.py is an OLD copy (it has no 'diagnose').", "Upload the newest camera_pose.py to GitHub, then press CHECK FOR UPDATES."]
             try:
                 lines.append("CAMERA permission: " + {True: "granted", False: "NOT granted", None: "unknown"}[notifier.has_permission("android.permission.CAMERA")])
             except Exception:
@@ -926,8 +945,10 @@ class SoloSystemApp(App):
         def work():
             try:
                 msg, changed = updater.check()
+                if not changed:
+                    msg += "\nYour app already has the same files as your GitHub repo.\nIf you expected something new, upload the newest files to SoloSystem/SoloSystem (main branch)."
             except Exception as e:
-                msg, changed = "Update check failed: %s" % e, False
+                msg, changed = "Update check failed: %s" % explain_update_error(e), False
             Clock.schedule_once(lambda dt: self.update_done(msg, changed, auto), 0)
         threading.Thread(target=work, daemon=True).start()
 
@@ -935,6 +956,35 @@ class SoloSystemApp(App):
         self.update_text = msg
         if changed or not auto:
             self.popup("[ UPDATE ]", msg)
+
+    def update_details(self):
+        """Compares every live-updatable file with the copy on GitHub and shows the result."""
+        self.update_text = "Comparing with GitHub..."
+
+        def work():
+            lines = ["Running code: " + ("LIVE (downloaded from GitHub)" if loader.is_live() else "BUILT-IN (inside the APK)")]
+            for name in loader.UPDATE_FILES:
+                try:
+                    src = updater.fetch(name)
+                    mine = updater.current_source(name)
+                    lines.append("%s\n    GitHub %s | your app %s  ->  %s" % (
+                        name, hashlib.sha1(src.encode("utf-8")).hexdigest()[:7], hashlib.sha1(mine.encode("utf-8")).hexdigest()[:7] if mine else "none",
+                        "same" if src == mine else "DIFFERENT (press CHECK FOR UPDATES)"))
+                except Exception as e:
+                    lines.append("%s\n    %s" % (name, "NOT FOUND on GitHub - upload it" if "404" in str(e) else explain_update_error(e).splitlines()[0]))
+            text = "\n".join(lines)
+            Clock.schedule_once(lambda dt: self.show_update_details(text), 0)
+        threading.Thread(target=work, daemon=True).start()
+
+    def show_update_details(self, text):
+        self.update_text = "Details ready."
+
+        def copy(v):
+            Clipboard.copy(text)
+            self.popup("[ UPDATE ]", "Copied!")
+            return False
+        self.dialog("[ UPDATE DETAILS ]", "Your app compared with your GitHub repo:", [("COPY", copy), ("CLOSE", lambda v: None)],
+                    hint="", text_in=text, readonly=True, multiline=True, height=dp(280), size=(0.95, 0.88))
 
     def admin_revert(self):
         loader.discard()
@@ -1064,9 +1114,10 @@ class SoloSystemApp(App):
         tot = sum(a.values()) or 1
         cols = {"Physical": "ff6b6b", "Mental": "6bb6ff", "Spiritual": "c08bff"}
         self.stats_text = "\n\n".join(
-            "[color=%s]%s Attributes[/color]\n[size=28sp][b]%d[/b][/size]   (%d%%)" % (cols[k], k, a[k], round(a[k] * 100.0 / tot))
+            "[color=%s]%s Attributes[/color]\n[size=28sp][b]%d[/b][/size]   (%d%%)\n[size=12sp]quest level %d   -   next growth at %d[/size]" % (
+                cols[k], k, a[k], round(a[k] * 100.0 / tot), attr_tier(a[k]), tier_points(attr_tier(a[k]) + 1))
             for k in CATS)
-        self.extra_text = "Streak: %d days   |   Pending punishments: %d\nBuild 2.0 (%s)" % (d["streak"], len(d["punishments"]), updater.code_label())
+        self.extra_text = "Streak: %d days   |   Pending punishments: %d\nBuild 2.1 (%s)" % (d["streak"], len(d["punishments"]), updater.code_label())
         self.log_text = ""
         self.build_quests()
         self.build_shop()
@@ -1944,7 +1995,7 @@ class SoloSystemApp(App):
     def toggle_scaling(self):
         self.g.d["scale_quests"] = not self.g.d.get("scale_quests", True)
         self.g.save()
-        self.popup("[ ADMIN ]", "Quest growth every 10 levels is now %s.\n(Applies to quests issued from the next day.)" %
+        self.popup("[ ADMIN ]", "Quest growth with your attributes is now %s.\n(Applies to quests issued from the next day.)" %
                    ("ON" if self.g.d["scale_quests"] else "OFF"))
 
     def open_planner(self):
