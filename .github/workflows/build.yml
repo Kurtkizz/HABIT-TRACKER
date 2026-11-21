@@ -20,6 +20,32 @@ jobs:
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL /usr/local/lib/android
           df -h /
       - uses: actions/checkout@v4
+      - name: Check the files in the repo
+        working-directory: SoloSystem/SoloSystem
+        run: |
+          missing=0
+          {
+            echo "### Files in SoloSystem/SoloSystem"
+            echo ""
+            echo "| File | Status |"
+            echo "|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for f in main.py app_main.py engine.py loader.py updater.py service.py service_main.py notifier.py reps.py camera_pose.py runtrack.py p4a_widget_hook.py buildozer.spec icon.png presplash.png; do
+            if [ -f "$f" ]; then
+              echo "OK       $f ($(wc -c < "$f") bytes)"
+              echo "| $f | OK ($(wc -c < "$f") bytes) |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "MISSING  $f"
+              echo "| $f | **MISSING** |" >> "$GITHUB_STEP_SUMMARY"
+              missing=1
+            fi
+          done
+          build=$(grep -o 'Build [0-9][0-9.]* (%s)' app_main.py | head -1 | sed 's/ (%s)//')
+          diag=$(grep -c "def diagnose" camera_pose.py || true)
+          echo "app_main.py says: ${build:-no build number}"
+          echo "camera_pose.py has diagnose(): $diag (1 = newest)"
+          { echo ""; echo "app_main.py says **${build:-no build number}**. camera_pose.py newest: **$diag** (1 = yes, 0 = old copy)"; } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$missing" = "1" ]; then echo "::warning::Some files are missing from SoloSystem/SoloSystem - upload them from the newest zip"; fi
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
